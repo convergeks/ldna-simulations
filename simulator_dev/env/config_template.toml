@@ -1,0 +1,36 @@
+# streamlit settings
+mapbox_token = 'add-youre-token-here'
+
+# instrument configurations:
+gateways = {asset1="sim_crane1", asset2="sim_crane2", asset3="sim_forklift1"}
+beacon_prename = "DD:beacon"
+num_beacons = 1
+
+# Insturment comms:
+# BLE freq & power settings
+channel = "ch37"
+power_dBm = 4
+systemLoss = 15
+Channel37Freq_hz = 2.402e9
+Channel39Freq_hz = 2.48e9
+freqChannelHz = {ch37=2.402e9, ch39=2.48e9}
+
+# Instrument Mechanical settings
+RxHeight = 5 # metres
+TxHeight = 1 # metres
+Crane_TravelSpeed = 2  # m/s
+Crane_HookDropLiftRate = 0.1 # m/s
+
+# data map: keys
+
+# Location Settings
+## Loc: KXS4
+## Map
+ROOT = "./"
+OSM_Map = "data/CEMCSite/CEMC_map.osm"
+## Corner boundaries
+LL_Lat = 51.538496800
+LL_Lon = -0.125863600
+UR_Lat = 51.538356900
+UR_Lon = -0.125731600
+YardOrientaion_deg = 90
