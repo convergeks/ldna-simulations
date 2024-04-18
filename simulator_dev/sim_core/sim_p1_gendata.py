@@ -12,7 +12,6 @@ import utils.util_routine_calcs as util
 
 # Files
 
-
 # -- scripts --
 class GenerateData(p0.Setup):
     def __init__(self):
@@ -136,12 +135,12 @@ class GenerateData(p0.Setup):
         #   receiver 
         eng = self.matlab_engine
         gateway_lon, gateway_lat = self.gateway_locations[gateway_id]['lonlat_coord']
-        gateway_RxHeight = self.config['RxHeight']        
-        rx = eng.rxsite('Name', "Crane Receiver", 
+        gateway_RxHeight = self.config['RxHeight']
+        rx = eng.rxsite('Name', "Crane Receiver",
                         "Latitude", gateway_lat,
                         "Longitude", gateway_lon,
-                        "AntennaHeight", gateway_RxHeight) 
-        self.rx = rx       
+                        "AntennaHeight", gateway_RxHeight)
+        self.rx = rx
 
     def calc_txsignal(self, SHOW=True):
         eng = self.matlab_engine

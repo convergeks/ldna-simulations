@@ -55,7 +55,8 @@ class Setup(object):
         out_tuple = get_coords.get_XY1_XY2_alpha(ref_coords=ref_lonlat,
                                                           coord_diag1=LL_lonlat,
                                                           coord_diag2=UR_lonlat,
-                                                          ang=Alpha)
+                                                          ang=Alpha
+                                                )
         XY1, XY2, DThAlpha, bm = out_tuple
         # basemap
         self.basemap = bm
