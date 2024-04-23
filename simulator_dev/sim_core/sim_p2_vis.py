@@ -13,6 +13,7 @@ import numpy as np
 import datetime as dt
 from datetime import datetime
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 # import local code
 import sim_p0_setupdevices as p0
 import sim_p1_generate_rxtxdata as p1
@@ -83,7 +84,8 @@ def get_site_latlon(site, env_path=p0.ENV_FILE):
 def get_stored_sessionfields():
     session_fields = ['site', 'device', 'action', 'prior_site', 'filters', 'clicked_latlon',
                       'show_markers', 'folium_map', 'mapdata', 'results', 'zoom_level',
-                      'start_date', 'start_time', 'sim_start_timestamp', 'load_file'
+                      'start_date', 'start_time', 'sim_start_timestamp', 'load_file',
+                      'gateway_prefix', 'beacon_prefix'
                      ]
     return session_fields
 
@@ -108,19 +110,19 @@ def save_session_state(this_session_state, session_file):
     except Exception as e:
         print("Error during saving session state:", e)
 
-def load_session_state():
+def load_session_state(VERBOSE=False):
     folder_path, selected_filename = get_state_filepath()
     session_file = os.path.join(folder_path, selected_filename)
-    # st.session_state['load_file'] = selected_filename
     if os.path.exists(session_file):
         try:
             with open(session_file, 'rb') as f:
                 loaded_state = pickle.load(f)
-                print("Loaded session state:", selected_filename) #, loaded_state)
+                if VERBOSE:
+                    print("Loaded session state:", selected_filename) #, loaded_state)
                 return loaded_state
         except Exception as e:
             print("Error during loading session state:", e)
-            st.write(f'Error in loading file: {sessioselected_filenamen_file}')
+            st.write(f'Error in loading file: {session_file}')
     else:
         print(f"{session_file} not found")
     return None
@@ -154,10 +156,14 @@ with st.sidebar:
                 st.session_state['show_markers'] = False
                 st.session_state['folium_map'] = None
                 st.session_state['mapdata'] = {}
-                st.session_state['results'] = pd.DataFrame()
+                st.session_state['results'] = {'rssi_gps': pd.DataFrame(),
+                                               'beacon': pd.DataFrame(),
+                                               'gateway': pd.DataFrame()}
                 st.session_state['zoom_level'] = 17
                 st.session_state['load_file'] = ''
-        if st.session_state["session_action"] == session_action_list[2] :
+                st.session_state['gateway_prefix'] = 'GW'
+                st.session_state['beacon_prefix'] = 'BC'
+        if st.session_state["session_action"] == session_action_list[2]:
             loaded_state = load_session_state()
             if st.button('load'):
                 if loaded_state is not None:
@@ -171,6 +177,7 @@ with st.sidebar:
                             site_index = SITE[val]
                         if key == 'load_file':
                             continue
+
     if 'sel_load_file' in st.session_state:
         st.write('Session file in Use: {0}'.format(st.session_state['sel_load_file']) )
 
@@ -195,6 +202,8 @@ with st.sidebar:
         if st.session_state['action'] == 'Generate':
             # Generate
             st.radio("Device: ", DEVICES, index=0, key="device")
+        gw = st.text_input('Gateway Prefix', 'GWsimulated', key='gateway_prefix')
+        bcn = st.text_input('Beacon Prefix', 'BCsimulated', key='beacon_prefix')
         if st.button('Clear All Devices'):
             st.session_state["clicked_latlon"] = {d: [] for d in DEVICES}
         st.header("Simulation Parameters")    
@@ -207,7 +216,6 @@ with st.sidebar:
         for dev in DEVICES:
             dev_markers = st.session_state["clicked_latlon"][dev]
             st.write(dev + ' Markers=' + str(len(dev_markers)))
-
 
 with st.container():
     if 'prior_site' in st.session_state:
@@ -230,10 +238,12 @@ with st.container():
                 #Setup the content of the popup
                 if dev_type == 'Gateway':
                     icon_type = GW_ICON_TYPES[num_label[idx]]
-                    ttl = f'Gateway ID={GATEWAY_ID}, Marker{idx}'
+                    gateway_id = st.session_state['gateway_prefix']+str(GATEWAY_ID)
+                    ttl = f'Gateway ID={gateway_id}, Marker{idx}'
                 else:
-                    icon_type = BEACON_ICON_TYPES[0]
-                    ttl = f'Beacon {idx}'
+                    icon_type = BEACON_ICON_TYPES[0]                    
+                    beacon_id = st.session_state['beacon_prefix']+str(idx)
+                    ttl = f'Beacon {beacon_id}, Marker={idx}'
 
                 clr = DEV_CLR[dev_type]
                 this_icon=folium.Icon(color=clr, icon=icon_type)
@@ -256,31 +266,41 @@ with st.container():
 
         if st.button('Compute'):
             beacon_coord_list = st.session_state["clicked_latlon"]['Beacon']
-            beacon_coord_map = {bid: coord for bid, coord in enumerate(beacon_coord_list)}
+            beacon_coord_map = {st.session_state['beacon_prefix']+str(bid): coord for bid, coord in enumerate(beacon_coord_list)}
             gateway_markers = st.session_state["clicked_latlon"]['Gateway']
-            gateway_coords_dict = {GATEWAY_ID: gateway_markers}
+            gateway_coords_dict = {st.session_state['gateway_prefix']+str(GATEWAY_ID): gateway_markers}
             gendata = p1.GenerateData(beacon_coords=beacon_coord_map,
                                         gateway_coords=gateway_coords_dict,
                                         start_time=st.session_state['sim_start_timestamp']
                                         )
-            gendata.generate_csv_file(csvpath=DEFAULT_CSVPATH)
-            st.session_state['results'] = gendata.rssi_gps_df
-        
+            gendata.generate_csv_file_bydevice(csvpath=DEFAULT_CSVPATH)
+            st.session_state['results'] = {'rssi_gps': gendata.rssi_gps_df,
+                                           'beacon': gendata.beacon_df,
+                                           'gateway': gendata.gateway_df
+                                           }
+
         if st.button('Show Results'):
-            all_df = st.session_state['results']
-            clrs = list('cbkry')
+            all_df = st.session_state['results']['beacon']
             for bid, df in all_df.groupby('beacon_id'):
-                df['rssi_error'] = df.rssi_var.apply(lambda x: np.mean(list(x)) )
+                clrs = list('cbkry')
                 st.write(df)
                 arr = np.random.normal(1, 1, size=100)
                 fig, ax = plt.subplots()
-                clr = clrs.pop(0)
-                clrs.append(clr)
-                ax.errorbar(df.index, df.rssi, df.rssi_error,
-                            capsize=5, marker='o',
-                            color=clr, label=f'Beacon{bid}')
+                # ax.errorbar(df.time, df.rssi, df.rssi_error,
+                #             capsize=5, marker='o',
+                #             color=clr, label=f'Beacon{bid}')
+                for gw_mark_id, mdf in df.groupby('marker_index'):
+                    clr = clrs.pop(0)
+                    clrs.append(clr)
+                    ax.plot(mdf.time, mdf.rssi, marker='o',
+                            color=clr, label=f'Marker {gw_mark_id}')
+                ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b %H:%M"))
+                plt.setp(ax.get_xticklabels(), rotation=90,
+                            fontsize = 12,
+                            ha="right");
+                ax.set_title(f'Beacon : {bid}')
+                ax.grid('on')
                 ax.legend()
                 ax.set_ylim([-95, -30])
-                ax.set_xlabel('gateway marker index')
                 ax.set_ylabel('rssi / dBm')
                 st.pyplot(fig)
