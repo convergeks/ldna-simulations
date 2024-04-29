@@ -178,7 +178,7 @@ class GenerateData(p0.Setup):
                         gps_lat = row.latitude + gps_dlat
                         gps_lon = row.longitude + gps_dlon
                         loc_err = (gps_dlat, gps_dlon)
-                        gps_acc = util.haversine(loc_err, (0, 0))
+                        gps_acc = util.haversine_distance(loc_err, (0, 0))
                         #store gateway data
                         gps_data = {'time': gps_time, 'latitude': gps_lat, 'longitude': gps_lon, 'accuracy': gps_acc,
                                     'gateway_id': gw_id, 'marker_index': idx}

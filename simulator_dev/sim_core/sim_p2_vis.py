@@ -2,6 +2,7 @@ import os
 import toml
 import pickle
 from pathlib import Path
+import time
 #
 import folium
 import streamlit as st
@@ -17,6 +18,10 @@ import matplotlib.dates as mdates
 # import local code
 import sim_p0_setupdevices as p0
 import sim_p1_generate_rxtxdata as p1
+# reg - qrcode
+import segno
+import io
+from PIL import Image
 
 # paths
 ROOT = os.getcwd()
@@ -24,10 +29,11 @@ if "sim_core" in ROOT:
     ROOT = os.getcwd().parent
 DEFAULT_OUTPATH = os.path.join(ROOT, "dump")
 DEFAULT_CSVPATH = os.path.join(ROOT, "dump/csvfiles")
+DEFAULT_IMPORT_DATAPATH = os.path.join(ROOT, "dump/datasource/dump/Tinglev/datasource/raw")
 
 # ----- options -----
 # site & dates
-SITE = {"CEMC": 0, "Oxford": 1, "Tinglev": 2, "FPMcCann": 3, "Creagh": 4}
+SITE = {"CEMC": 0, "Oxford": 1, "Tinglev": 2, "FPMcCann": 3, "Creagh": 4, 'KS': 5}
 #        , 'Oxford Hum.': 1, 'Converge Use': 2}
 FILTERS = {"Whole Site": 0}
 DEVICES = ['Gateway', 'Beacon']
@@ -39,6 +45,10 @@ GATEWAY_ID = 'G1'
 GW_ICON_TYPES = {'start': 'play',
                  'mid': 'forward',
                  'end': 'stop'
+                }
+GW_ICON_CLRS = {'start': 'black',
+                 'mid': 'green',
+                 'end': 'red'
                 }
 BEACON_ICON_TYPES = ['cog']
 DEV_CLR = {'Gateway': 'green', 'Beacon': 'blue'}
@@ -94,6 +104,22 @@ def get_state_filepath(folder_path=DEFAULT_OUTPATH):
     selected_filename = st.selectbox('Select session file', filenames, key='load_file')
     return folder_path, selected_filename
 
+def get_gps_beacon_filepath(folder_path=DEFAULT_IMPORT_DATAPATH):
+    filenames = os.listdir(folder_path)
+    gateway_filenames = [f for f in filenames if 'gateway' in f]
+    gateway_filenames = sorted(gateway_filenames)
+    beacon_filenames = [f for f in filenames if 'beacon' in f]
+    beacon_filenames = sorted(beacon_filenames)
+    beacon_filename = ''
+    gateway_filename = ''
+    gateway_filename = st.selectbox('Select gateway file', gateway_filenames, key='import_gateway_file')
+    beacon_filename = st.selectbox('Select beacon file', beacon_filenames, key='import_beacon_file')
+    if st.button('import_data'):
+        selected_filename_map = {'gps': gateway_filename, 'rssi': beacon_filename}
+        return folder_path, selected_filename_map
+    else:
+        return None, None
+
 def set_state_filepath(folder_path=DEFAULT_OUTPATH):
     flname = st.text_input('session filename', '')
     session_file = os.path.join(folder_path, flname)
@@ -127,6 +153,32 @@ def load_session_state(VERBOSE=False):
         print(f"{session_file} not found")
     return None
 
+def import_data():
+    folder_path, selected_filename = get_gps_beacon_filepath()
+    if selected_filename is not None:
+        import_gateway_file = os.path.join(folder_path, selected_filename['gps'])
+        import_beacon_file = os.path.join(folder_path, selected_filename['rssi'])    
+        gateway_df = pd.read_csv(import_gateway_file)
+        gateway_df['time'] = pd.to_datetime(gateway_df['time'])
+        gateway_df['time'] = gateway_df['time'].dt.tz_localize(dt.timezone.utc)
+        beacon_df = pd.read_csv(import_beacon_file)
+        beacon_df['time'] = pd.to_datetime(beacon_df['time'])
+        beacon_df['time'] = beacon_df['time'].dt.tz_localize(dt.timezone.utc)
+        data_df_map = {'gateway': gateway_df, 'beacon': beacon_df}
+        return data_df_map
+    else :
+        return None
+    
+# --- beacon util ===
+def get_beacon_id_str(pre, idx):
+    if 10<idx<100:
+        beacon_id = pre+str(idx)
+    elif idx<10:
+        beacon_id = pre+'0' +str(idx)
+    else:
+        beacon_id = pre[:-1] + str(idx)
+    return beacon_id
+
 # ---- main streamlit section ----
 # set max width
 _max_width_(percent_width=100)
@@ -134,10 +186,9 @@ _max_width_(percent_width=100)
 # if "site" not in st.session_state:
 #     # # settigs
 session_fields = ['site', 'device', 'action', '']
-session_action_list = ['Current', 'New/Reset', 'Load Prior']
+session_action_list = ['Current', 'New/Reset', 'Load Prior Session', 'Import GPS Data']
 # displays a file uploaded widget
 with st.sidebar:
-
     # Configuration/State Store and Load
     st.header('Session')
     col1, col2 = st.columns(2)
@@ -161,8 +212,11 @@ with st.sidebar:
                                                'gateway': pd.DataFrame()}
                 st.session_state['zoom_level'] = 17
                 st.session_state['load_file'] = ''
-                st.session_state['gateway_prefix'] = 'GW'
-                st.session_state['beacon_prefix'] = 'BC'
+                st.session_state['gateway_prefix'] = 'gwsimulate'
+                st.session_state['beacon_prefix'] = 'BC' + 'sims'.encode('utf-8').hex().upper()
+                st.session_state["imported_data"] = {}
+                st.session_state['import_beacon_prefix'] = 'BC' + 'test'.encode('utf-8').hex().upper()
+                st.session_state["imported_beacon_data"] = {}
         if st.session_state["session_action"] == session_action_list[2]:
             loaded_state = load_session_state()
             if st.button('load'):
@@ -177,7 +231,14 @@ with st.sidebar:
                             site_index = SITE[val]
                         if key == 'load_file':
                             continue
-
+                    st.session_state["imported_data"] = {}
+                    st.session_state["imported_beacon_data"] = {}
+        if st.session_state["session_action"] == session_action_list[3]:
+            st.session_state['import_beacon_prefix'] = 'BC' + 'test'.encode('utf-8').hex().upper()
+            data_df_map = import_data()
+            if data_df_map is not None:
+                st.write(data_df_map.keys())
+                st.session_state["imported_data"] = data_df_map
     if 'sel_load_file' in st.session_state:
         st.write('Session file in Use: {0}'.format(st.session_state['sel_load_file']) )
 
@@ -202,8 +263,8 @@ with st.sidebar:
         if st.session_state['action'] == 'Generate':
             # Generate
             st.radio("Device: ", DEVICES, index=0, key="device")
-        gw = st.text_input('Gateway Prefix', 'GWsimulated', key='gateway_prefix')
-        bcn = st.text_input('Beacon Prefix', 'BCsimulated', key='beacon_prefix')
+        gw = st.text_input('Gateway Prefix', 'gwsimulate', key='gateway_prefix')
+        bcn = st.text_input('Beacon Prefix', 'BC'+ 'sims'.encode('utf-8').hex().upper(), key='beacon_prefix')
         if st.button('Clear All Devices'):
             st.session_state["clicked_latlon"] = {d: [] for d in DEVICES}
         st.header("Simulation Parameters")    
@@ -217,90 +278,248 @@ with st.sidebar:
             dev_markers = st.session_state["clicked_latlon"][dev]
             st.write(dev + ' Markers=' + str(len(dev_markers)))
 
-with st.container():
-    if 'prior_site' in st.session_state:
-        # Wait till we get a session started
-        st.header("Generate Markers: {0}".format( st.session_state["site"]))
-        LATLON = get_site_latlon(st.session_state["site"])
-        #
-        st.select_slider('Zoom Levels', options=[i for i in range(10,20)], key='zoom_level')
-        m = folium.Map(location=list(LATLON), zoom_start=st.session_state['zoom_level'], width=700)
-        # actions
-        if st.session_state['action'] == 'Generate':
-            dev_marker_dict = {st.session_state["device"]: st.session_state["clicked_latlon"][st.session_state["device"]]}
-        else:
-            dev_marker_dict = st.session_state["clicked_latlon"]
+tab_build, tab_reg, tab_import = st.tabs(["Build Sims", "Register", "Import Gateway Data"])
+with tab_build: 
+    with st.container():
+        if 'prior_site' in st.session_state:
+            # Wait till we get a session started
+            st.header("Generate Markers: {0}".format( st.session_state["site"]))
+            LATLON = get_site_latlon(st.session_state["site"])
+            #
+            st.select_slider('Zoom Levels', options=[i for i in range(10,20)], key='zoom_level')
+            m = folium.Map(location=list(LATLON), zoom_start=st.session_state['zoom_level'], width=700)
+            # actions
+            if st.session_state['action'] == 'Generate':
+                dev_marker_dict = {st.session_state["device"]: st.session_state["clicked_latlon"][st.session_state["device"]]}
+            else:
+                dev_marker_dict = st.session_state["clicked_latlon"]
 
-        for dev_type, dev_markers in dev_marker_dict.items():
-            N = len(dev_markers)
-            num_label = {idx: 'start' if (idx == 0) else 'end' if idx==(N-1) else 'mid' for idx in range(N)}
-            for idx, this_latlon in enumerate(dev_markers):
-                #Setup the content of the popup
-                if dev_type == 'Gateway':
-                    icon_type = GW_ICON_TYPES[num_label[idx]]
-                    gateway_id = st.session_state['gateway_prefix']+str(GATEWAY_ID)
-                    ttl = f'Gateway ID={gateway_id}, Marker{idx}'
-                else:
-                    icon_type = BEACON_ICON_TYPES[0]                    
-                    beacon_id = st.session_state['beacon_prefix']+str(idx)
-                    ttl = f'Beacon {beacon_id}, Marker={idx}'
+            for dev_type, dev_markers in dev_marker_dict.items():
+                N = len(dev_markers)
+                num_label = {idx: 'start' if (idx == 0) else 'end' if idx==(N-1) else 'mid' for idx in range(N)}
+                for idx, this_latlon in enumerate(dev_markers):
+                    #Setup the content of the popup
+                    if dev_type == 'Gateway':
+                        icon_type = GW_ICON_TYPES[num_label[idx]]
+                        gateway_id = st.session_state['gateway_prefix']+str(GATEWAY_ID)
+                        ttl = f'Gateway ID={gateway_id}, Marker{idx}'
+                    else:
+                        icon_type = BEACON_ICON_TYPES[0]
+                        beacon_id = get_beacon_id_str(st.session_state['beacon_prefix'], idx)                   
+                        ttl = f'Beacon {beacon_id}, Marker={idx}'
 
-                clr = DEV_CLR[dev_type]
-                this_icon=folium.Icon(color=clr, icon=icon_type)
-                folium.Marker(
-                                list(this_latlon),  icon=this_icon, tooltip=ttl, 
+                    clr = DEV_CLR[dev_type]
+                    this_icon=folium.Icon(color=clr, icon=icon_type)
+                    folium.Marker(
+                                    list(this_latlon),  icon=this_icon, tooltip=ttl, 
+                                    popup=this_latlon
+                                    ).add_to(m)
+                    m.add_child(folium.LatLngPopup())
+            mapdata = st_folium(m, height=700, width=700)
+            #
+            st.session_state['folium_map'] = m
+            st.session_state['mapdata'] = mapdata
+
+            # main display
+            mapdata  = st.session_state['mapdata']
+            if ('last_clicked' in mapdata) and isinstance(mapdata['last_clicked'], dict):
+                this_latlon = (mapdata['last_clicked']['lat'], mapdata['last_clicked']['lng'])
+                st.session_state["clicked_latlon"][st.session_state["device"]].append(this_latlon)
+            if st.button('Compute'):
+                beacon_coord_list = st.session_state["clicked_latlon"]['Beacon']
+                print(beacon_coord_list)
+                beacon_coord_map = {get_beacon_id_str(st.session_state['beacon_prefix'], bid): coord for bid, coord in enumerate(beacon_coord_list)}
+                print(list(beacon_coord_map.keys()))
+                # beacon_coord_map = {st.session_state['beacon_prefix']+str(bid): coord for bid, coord in enumerate(beacon_coord_list)}
+                gateway_markers = st.session_state["clicked_latlon"]['Gateway']
+                gateway_coords_dict = {st.session_state['gateway_prefix']+str(GATEWAY_ID): gateway_markers}
+                gendata = p1.GenerateData(beacon_coords=beacon_coord_map,
+                                            gateway_coords=gateway_coords_dict,
+                                            start_time=st.session_state['sim_start_timestamp']
+                                         )
+                gendata.generate_csv_file_bydevice(csvpath=DEFAULT_CSVPATH)
+                st.session_state['results'] = {'rssi_gps': gendata.rssi_gps_df,
+                                            'beacon': gendata.beacon_df,
+                                            'gateway': gendata.gateway_df
+                                            }
+
+            if st.button('Show Results'):
+                all_df = st.session_state['results']['beacon']
+                for bid, df in all_df.groupby('beacon_id'):
+                    clrs = list('cbkry')
+                    st.write(df)
+                    arr = np.random.normal(1, 1, size=100)
+                    fig, ax = plt.subplots()
+                    # ax.errorbar(df.time, df.rssi, df.rssi_error,
+                    #             capsize=5, marker='o',
+                    #             color=clr, label=f'Beacon{bid}')
+                    for gw_mark_id, mdf in df.groupby('marker_index'):
+                        clr = clrs.pop(0)
+                        clrs.append(clr)
+                        ax.plot(mdf.time, mdf.rssi, marker='o',
+                                color=clr, label=f'Marker {gw_mark_id}')
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b %H:%M"))
+                    plt.setp(ax.get_xticklabels(), rotation=90,
+                                fontsize = 12,
+                                ha="right");
+                    ax.set_title(f'Beacon : {bid}')
+                    ax.grid('on')
+                    ax.legend()
+                    ax.set_ylim([-95, -30])
+                    ax.set_ylabel('rssi / dBm')
+                    st.pyplot(fig)
+
+with tab_reg:
+    with st.container():
+        if ('clicked_latlon' in st.session_state) and ('Beacon' in st.session_state["clicked_latlon"]):
+            beacon_coord_list = st.session_state["clicked_latlon"]['Beacon']
+            if len(beacon_coord_list)>0:
+                beacon_coord_map = {get_beacon_id_str(st.session_state['beacon_prefix'], bid): coord for bid, coord in enumerate(beacon_coord_list)}
+                beacon_ids = list(beacon_coord_map.keys())
+                sel_beacon = st.selectbox('Select beacon', beacon_ids)
+                unit_txt=st.text_input('Unit ID', '')
+                beacon_txt=st.text_input('Beacon ID', f'MAC:{sel_beacon},SERIAL:{sel_beacon[-2:]};')
+                if st.button('Generate QRcodes'):
+                    unit_qrcode = segno.make(unit_txt)
+                    beacon_qrcode = segno.make(beacon_txt)
+                    # bcn_img = beacon_qrcode.to_pil(scale=3)
+                    fig, axes = plt.subplots(ncols=2)
+                    ax = axes[0]
+                    unit_out = io.BytesIO()
+                    unit_qrcode.save(unit_out, scale=3, kind='png')
+                    unit_out.seek(0)  # Important to let PIL / Pillow load the image
+                    unit_img = Image.open(unit_out)  # Done, do what ever you want with the PIL/Pillow image
+                    ax.imshow(unit_img)
+                    ax.axis('off')
+                    ax.set_title(unit_txt)
+                    ax = axes[1]
+                    beacon_out = io.BytesIO()
+                    beacon_qrcode.save(beacon_out, scale=3, kind='png')
+                    beacon_out.seek(0)  # Important to let PIL / Pillow load the image
+                    bcn_img = Image.open(beacon_out)  # Done, do what ever you want with the PIL/Pillow image
+                    ax.imshow(bcn_img)
+                    ax.axis('off')
+                    ax.set_title(beacon_txt)
+                    st.pyplot(fig)
+
+with tab_import:
+    with st.container():
+        if 'imported_data' in st.session_state and (len(st.session_state['imported_data']) > 0):
+            data_df = st.session_state['imported_data']
+            gateway_df = data_df['gateway']
+            gateway_list = sorted(gateway_df.gateway.unique())
+            beacon_df = data_df['beacon']
+            beacon_list = sorted(beacon_df.beacon.unique())
+            beacon_list = [bid for bid in beacon_list if bid[:2]=='BC']
+            #
+            import_col1, import_col2 = st.columns(2)
+            with import_col1:
+                this_gateway_id = st.selectbox('Select gateway to review', gateway_list, key='review_gateway', index=0)
+                gateway_df = gateway_df[gateway_df.gateway==this_gateway_id]
+                # start, end time
+                import_start_time = st.time_input("Start Time", gateway_df.time.min(), key='import_start_time')
+                import_end_time = st.time_input("End Time", gateway_df.time.max(), key='import_end_time')
+                # convert gateway data into milestones
+                gateway_df['valid'] = gateway_df.time.apply(lambda x: import_start_time<=x.time()<=import_end_time)
+                gps_df = gateway_df[gateway_df['valid']]
+                # st.write(gateway_df.shape, gps_df.shape, gps_df.time.min(), gps_df.time.max())            
+                gps_df['minutes_from_start'] = gps_df.time.apply(lambda x: int((x - gps_df.time.min()).total_seconds()/60))
+                gps_milestones_dict = {'gateway':[], 'time':[], 'latitude':[], 'longitude':[], 'accuracy':[]}
+                for this_minute, gdf in gps_df.groupby('minutes_from_start'):
+                    gdf = gdf.sort_values(by=['time'], ascending=True)
+                    this_row = gdf.iloc[0]
+                    for fld in gps_milestones_dict:
+                        gps_milestones_dict[fld].append(this_row[fld])
+                gps_milestones_df = pd.DataFrame.from_dict(gps_milestones_dict)
+                gps_milestones_df = gps_milestones_df.sort_values(by=['time'], ascending=True)
+                # rssi_df = beacon_df.time.apply(lambda x: import_start_time<=x.time.time()<=import_end_time)
+                # show map
+                LATLON = gps_milestones_df.latitude.mean(), gps_milestones_df.longitude.mean()
+                #
+            st.select_slider('Zoom Levels', options=[i for i in range(10,20)], key='zoom_level_import')
+            m = folium.Map(location=list(LATLON), zoom_start=st.session_state['zoom_level_import'], width=700)
+            #
+            N = gps_milestones_df.shape[0]
+            num_label = {idx: 'start' if (idx == 0) else 'end' if idx==(N-1) else 'mid' for idx in range(N)}            
+            coordinates = []
+            for idx, row in gps_milestones_df.iterrows():
+                this_latlon = row.latitude, row.longitude
+                coordinates.append(list(this_latlon))
+                icon_type = GW_ICON_TYPES[num_label[idx]]
+                icon_clr = GW_ICON_CLRS[num_label[idx]]
+                this_hhmm = str(row.time.time())[:5]
+                this_date = row.time.date().strftime('%B %d')
+                # this_hhmm = time.strftime('%H:%M', row.time)
+                ttl = f'{this_date}@{this_hhmm}, <br> Marker{idx} <br> ID={this_gateway_id}'
+                clr = DEV_CLR['Gateway']
+                if num_label[idx] != 'mid':
+                    this_icon=folium.Icon(color=icon_clr, icon=icon_type)
+                    folium.Marker(
+                                list(this_latlon),  icon=this_icon,
+                                tooltip=ttl, #this_latlon,
                                 popup=this_latlon
                                 ).add_to(m)
+                else:
+                    folium.CircleMarker(list(this_latlon),
+                                        raidus=10,
+                                        opacity=0.5,
+                                        color=clr,
+                                        fill_color=clr,
+                                        popup=this_latlon,
+                                        tooltip=ttl
+                                        ).add_to(m)
                 m.add_child(folium.LatLngPopup())
-        mapdata = st_folium(m, height=700, width=700)
-        #
-        st.session_state['folium_map'] = m
-        st.session_state['mapdata'] = mapdata
+            #
+            if st.checkbox('Show Connector'):
+                folium.PolyLine(
+                                locations=coordinates,
+                                color="#FF0000",
+                                weight=2,
+                                tooltip="Connect the dots",
+                            ).add_to(m)
+            # add beacons
+            with import_col2:
+                add_beacons_numbers = st.text_input('# of Beacons to add', '0')
+                Nbeacons = int(add_beacons_numbers)
+                if Nbeacons>0:
+                    import_beacon_number = st.selectbox('Select beacon number', np.arange(1, Nbeacons+1), key='import_num_beacons')
+                    import_beacon_handle = st.text_input('Beacon handle', f'Test-Beacon-{import_beacon_number}')
+                    beacon_mac = get_beacon_id_str(st.session_state['import_beacon_prefix'], import_beacon_number)
+                    import_beacon_mac = st.text_input('Beacon mac address', beacon_mac)
+                    import_beacon_latitude = st.text_input('Latitude', '', key='import_lat')
+                    import_beacon_longitude = st.text_input('Longitude', '', key='import_lon')
+                    if len(beacon_list)>0:
+                        map_to_real_beacon = st.selectbox('Map to real beacon', beacon_list, index=0, key='real_beacon')
+                    else:
+                        map_to_real_beacon = ''
 
-        # main display
-        mapdata  = st.session_state['mapdata']
-        if ('last_clicked' in mapdata) and isinstance(mapdata['last_clicked'], dict):
-            this_latlon = (mapdata['last_clicked']['lat'], mapdata['last_clicked']['lng'])
-            st.session_state["clicked_latlon"][st.session_state["device"]].append(this_latlon)
+                    if len(import_beacon_latitude)>0 & len(import_beacon_longitude)>0:
+                        imported_bcn_latlon = float(import_beacon_latitude), float(import_beacon_longitude)
+                if 'imported_beacon_data' not in st.session_state:
+                    st.session_state["imported_beacon_data"] = {} 
+                imported_beacon_data = st.session_state["imported_beacon_data"]
+                if st.button('Ingest beacon data'):
+                    imported_beacon_data[import_beacon_number] = {'name': import_beacon_handle,
+                                                                  'mac': import_beacon_mac,
+                                                                  'latlon': (st.session_state['import_lat'], st.session_state['import_lon']),
+                                                                  'real_mac': map_to_real_beacon
+                                                                  }
+                    st.session_state["imported_beacon_data"] = imported_beacon_data
+                for bcn_num, bcn_data in st.session_state["imported_beacon_data"].items():
+                    bcn_name = bcn_data['name']
+                    bcn_mac = bcn_data['mac']
+                    bcn_latlon = bcn_data['latlon']
+                    icon_type = BEACON_ICON_TYPES[0]
+                    ttl = f'Beacon Name={bcn_name}, <br> Mac={bcn_mac}'
+                    clr = DEV_CLR['Beacon']
+                    this_icon=folium.Icon(color=clr, icon=icon_type)
+                    folium.Marker(
+                                    list(bcn_latlon),  icon=this_icon, tooltip=ttl,
+                                    popup=bcn_latlon
+                                    ).add_to(m)
+                    st.write(bcn_latlon)
+                
+            #
+            mapdata = st_folium(m, height=700, width=700)
 
-
-        if st.button('Compute'):
-            beacon_coord_list = st.session_state["clicked_latlon"]['Beacon']
-            beacon_coord_map = {st.session_state['beacon_prefix']+str(bid): coord for bid, coord in enumerate(beacon_coord_list)}
-            gateway_markers = st.session_state["clicked_latlon"]['Gateway']
-            gateway_coords_dict = {st.session_state['gateway_prefix']+str(GATEWAY_ID): gateway_markers}
-            gendata = p1.GenerateData(beacon_coords=beacon_coord_map,
-                                        gateway_coords=gateway_coords_dict,
-                                        start_time=st.session_state['sim_start_timestamp']
-                                        )
-            gendata.generate_csv_file_bydevice(csvpath=DEFAULT_CSVPATH)
-            st.session_state['results'] = {'rssi_gps': gendata.rssi_gps_df,
-                                           'beacon': gendata.beacon_df,
-                                           'gateway': gendata.gateway_df
-                                           }
-
-        if st.button('Show Results'):
-            all_df = st.session_state['results']['beacon']
-            for bid, df in all_df.groupby('beacon_id'):
-                clrs = list('cbkry')
-                st.write(df)
-                arr = np.random.normal(1, 1, size=100)
-                fig, ax = plt.subplots()
-                # ax.errorbar(df.time, df.rssi, df.rssi_error,
-                #             capsize=5, marker='o',
-                #             color=clr, label=f'Beacon{bid}')
-                for gw_mark_id, mdf in df.groupby('marker_index'):
-                    clr = clrs.pop(0)
-                    clrs.append(clr)
-                    ax.plot(mdf.time, mdf.rssi, marker='o',
-                            color=clr, label=f'Marker {gw_mark_id}')
-                ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b %H:%M"))
-                plt.setp(ax.get_xticklabels(), rotation=90,
-                            fontsize = 12,
-                            ha="right");
-                ax.set_title(f'Beacon : {bid}')
-                ax.grid('on')
-                ax.legend()
-                ax.set_ylim([-95, -30])
-                ax.set_ylabel('rssi / dBm')
-                st.pyplot(fig)
+    
