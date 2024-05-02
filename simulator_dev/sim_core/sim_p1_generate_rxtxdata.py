@@ -268,7 +268,6 @@ class GenerateData(p0.Setup):
     # -- BLE signal generation --
     def start_matlab(self):
         self.init_matlab()
-        eng = self.matlab_engine
 
     def get_tx(self, lonlat):
         # iterate over the tx positions
@@ -330,6 +329,7 @@ class GenerateData(p0.Setup):
         pl = -pl0*0.9 + 0.1*ss
         return pl
     
+
 if __name__ == "__main__":
     GW_MARKERS = [(53.304499263489, -1.1687564849853518),
                   (53.30513556505881, -1.170376539230347),

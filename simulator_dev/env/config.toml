@@ -35,6 +35,9 @@ UR_Lat = 51.538356900
 UR_Lon = -0.125731600
 YardOrientaion_deg = 90
 
+# System configurations
+RSSI_THRESH = -90
+
 # Lonlat for sites
 [[latlon]]
 id = 'CEMC'

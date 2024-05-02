@@ -7,6 +7,7 @@ import time
 import folium
 import streamlit as st
 from streamlit_folium import st_folium, folium_static
+import streamlit.components.v1 as st_components
 #
 import pandas as pd
 import numpy as np
@@ -15,9 +16,13 @@ import datetime as dt
 from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import mpld3
+import plotly.graph_objects as go
 # import local code
 import sim_p0_setupdevices as p0
 import sim_p1_generate_rxtxdata as p1
+import sim_p1x1_diagnose_rxtxdata as p1x1
+
 # reg - qrcode
 import segno
 import io
@@ -113,7 +118,9 @@ def get_gps_beacon_filepath(folder_path=DEFAULT_IMPORT_DATAPATH):
     beacon_filename = ''
     gateway_filename = ''
     gateway_filename = st.selectbox('Select gateway file', gateway_filenames, key='import_gateway_file')
-    beacon_filename = st.selectbox('Select beacon file', beacon_filenames, key='import_beacon_file')
+    beacon_filename = st.selectbox('Select beacon file', beacon_filenames, key='import_beacon_file')    
+    st.write(gateway_filename)
+    st.write(beacon_filename)
     if st.button('import_data'):
         selected_filename_map = {'gps': gateway_filename, 'rssi': beacon_filename}
         return folder_path, selected_filename_map
@@ -179,9 +186,62 @@ def get_beacon_id_str(pre, idx):
         beacon_id = pre[:-1] + str(idx)
     return beacon_id
 
+# --- show plots
+def compare_simreal_time(diagnostics):
+    # raw timeseries compare
+    sim_df = diagnostics.simbeacon_realgw_df
+    sim_bid = sim_df.sim_mac.iloc[0]
+    real_df = diagnostics.real_beacon_df
+    real_bid = real_df.beacon.iloc[0]
+    #
+    fig, axes = plt.subplots(nrows=2, figsize=(15,10), sharex=True, sharey=True)
+    ax = axes[0]
+    ax.plot(sim_df.time, sim_df.rssi, 'r', marker='o')#, color='Simulated')
+    ax.set_title(f'Simulated Beacon ', fontsize=30)#: {sim_bid}')
+    ax.grid('on')
+    ax.legend()
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b %H:%M"))
+    plt.setp(ax.get_yticklabels(),
+                fontsize = 20,
+                ha="right");
+    plt.setp(ax.get_xticklabels(), rotation=90,
+                fontsize = 20,
+                ha="right");
+    # ax.set_ylim([-95, -30])
+    ax.set_ylabel('rssi / dBm', fontsize=20)
+    ax = axes[1]
+    this_lbl = f'Real Beacon : {real_bid}'
+    ax.plot(real_df.time, real_df.rssi, 'k', marker='o')#, label=this_lbl)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b %H:%M"))
+    plt.setp(ax.get_xticklabels(), rotation=90,
+                fontsize = 20,
+                ha="right");
+    plt.setp(ax.get_yticklabels(),
+                fontsize = 20,
+                ha="right");
+    ax.set_title(this_lbl, fontsize=30)
+    ax.grid('on')
+    # ax.legend()
+    # ax.set_ylim([-95, -30])
+    ax.set_ylabel('rssi / dBm', fontsize=20)
+    return fig
+
+def compare_simreal_stats(diagnostics):
+    # visualise - stats
+    sim_df = diagnostics.simbeacon_realgw_df
+    real_df = diagnostics.real_beacon_df
+    #
+    fig, axes = plt.subplots(nrows=2, figsize=(15,10), sharex=True, sharey=True)
+    ax = axes[0]
+    # --- do it ---
+
+    # TODO: report analysis - what does this look like?
+    return fig
+
 # ---- main streamlit section ----
 # set max width
-_max_width_(percent_width=100)
+st.set_page_config(layout="wide")
+# _max_width_(percent_width=50)
 # invoke session state
 # if "site" not in st.session_state:
 #     # # settigs
@@ -416,16 +476,20 @@ with tab_import:
             with import_col1:
                 this_gateway_id = st.selectbox('Select gateway to review', gateway_list, key='review_gateway', index=0)
                 gateway_df = gateway_df[gateway_df.gateway==this_gateway_id]
+                #debug
+                # st.write(st.session_state["review_gateway"], this_gateway_id)
+
                 # start, end time
-                import_start_time = st.time_input("Start Time", gateway_df.time.min(), key='import_start_time')
-                import_end_time = st.time_input("End Time", gateway_df.time.max(), key='import_end_time')
+                import_start_time = st.time_input("Start Time", gateway_df.time.min(), key='import_start_time', step=5*60)
+                import_end_time = st.time_input("End Time", gateway_df.time.max(), key='import_end_time', step=5*60 )
                 # convert gateway data into milestones
                 gateway_df['valid'] = gateway_df.time.apply(lambda x: import_start_time<=x.time()<=import_end_time)
                 gps_df = gateway_df[gateway_df['valid']]
                 # st.write(gateway_df.shape, gps_df.shape, gps_df.time.min(), gps_df.time.max())            
                 gps_df['minutes_from_start'] = gps_df.time.apply(lambda x: int((x - gps_df.time.min()).total_seconds()/60))
+                gps_df['Nsecs_from_start'] = gps_df.time.apply(lambda x: int((x - gps_df.time.min()).total_seconds()/6))
                 gps_milestones_dict = {'gateway':[], 'time':[], 'latitude':[], 'longitude':[], 'accuracy':[]}
-                for this_minute, gdf in gps_df.groupby('minutes_from_start'):
+                for this_minute, gdf in gps_df.groupby('Nsecs_from_start'):
                     gdf = gdf.sort_values(by=['time'], ascending=True)
                     this_row = gdf.iloc[0]
                     for fld in gps_milestones_dict:
@@ -447,10 +511,10 @@ with tab_import:
                 coordinates.append(list(this_latlon))
                 icon_type = GW_ICON_TYPES[num_label[idx]]
                 icon_clr = GW_ICON_CLRS[num_label[idx]]
-                this_hhmm = str(row.time.time())[:5]
+                this_hhmmss = str(row.time.time())[:8]
                 this_date = row.time.date().strftime('%B %d')
                 # this_hhmm = time.strftime('%H:%M', row.time)
-                ttl = f'{this_date}@{this_hhmm}, <br> Marker{idx} <br> ID={this_gateway_id}'
+                ttl = f'{this_date}@{this_hhmmss}, <br> Marker{idx} <br> ID={this_gateway_id}'
                 clr = DEV_CLR['Gateway']
                 if num_label[idx] != 'mid':
                     this_icon=folium.Icon(color=icon_clr, icon=icon_type)
@@ -489,7 +553,7 @@ with tab_import:
                     import_beacon_latitude = st.text_input('Latitude', '', key='import_lat')
                     import_beacon_longitude = st.text_input('Longitude', '', key='import_lon')
                     if len(beacon_list)>0:
-                        map_to_real_beacon = st.selectbox('Map to real beacon', beacon_list, index=0, key='real_beacon')
+                        map_to_real_beacon = st.selectbox('Simulator models real beacon:', beacon_list, index=0, key='real_beacon')
                     else:
                         map_to_real_beacon = ''
 
@@ -498,28 +562,64 @@ with tab_import:
                 if 'imported_beacon_data' not in st.session_state:
                     st.session_state["imported_beacon_data"] = {} 
                 imported_beacon_data = st.session_state["imported_beacon_data"]
-                if st.button('Ingest beacon data'):
+                if st.button('Store/Show beacon data'):
+                    st.write(st.session_state['import_lat'], st.session_state['import_lon'])
                     imported_beacon_data[import_beacon_number] = {'name': import_beacon_handle,
                                                                   'mac': import_beacon_mac,
                                                                   'latlon': (st.session_state['import_lat'], st.session_state['import_lon']),
-                                                                  'real_mac': map_to_real_beacon
+                                                                  'real_mac': st.session_state['real_beacon']
                                                                   }
                     st.session_state["imported_beacon_data"] = imported_beacon_data
+                #
+                if st.button('Run Diagnostics'):
+                    beacon_data = st.session_state["imported_beacon_data"]
+                    this_beacon_data = beacon_data[import_beacon_number]
+                    st_time = time.time()
+                    diagnostics = p1x1.DiagnoseData(
+                                                real_gateway_id=st.session_state["review_gateway"],
+                                                beacon_data=st.session_state["imported_beacon_data"],
+                                                gateway_df=gateway_df,
+                                                beacon_df=beacon_df,
+                                                start_time=st.session_state["import_start_time"],
+                                                end_time=st.session_state["import_end_time"]
+                                                )
+                    st.write(diagnostics.valid_checks)
+                    # Analyse
+                    et0 = time.time()
+                    st.write(f'Setup: Time taken={et0-st_time:.1f}secs')
+                    diagnostics.create_simulated_beacon_data()
+                    et1 = time.time()
+                    st.write(f'Simulate: Time taken={et1-et0:.1f}secs')
+                    #
+                    st.session_state['diagnostics'] = diagnostics
+
+                #
                 for bcn_num, bcn_data in st.session_state["imported_beacon_data"].items():
                     bcn_name = bcn_data['name']
                     bcn_mac = bcn_data['mac']
                     bcn_latlon = bcn_data['latlon']
+                    real_bcn_mac = bcn_data['real_mac']
                     icon_type = BEACON_ICON_TYPES[0]
-                    ttl = f'Beacon Name={bcn_name}, <br> Mac={bcn_mac}'
+                    ttl = f'Beacon Name={bcn_name}, <br> Mac={bcn_mac}, <br> Real Mac={real_bcn_mac}'
                     clr = DEV_CLR['Beacon']
                     this_icon=folium.Icon(color=clr, icon=icon_type)
                     folium.Marker(
                                     list(bcn_latlon),  icon=this_icon, tooltip=ttl,
                                     popup=bcn_latlon
                                     ).add_to(m)
-                    st.write(bcn_latlon)
                 
             #
-            mapdata = st_folium(m, height=700, width=700)
+            mapdata = st_folium(m, height=1000, width=1000)
+
+            # diagnostics.compare_sims_vs_real()
+            if 'diagnostics' in st.session_state:
+                diagnostics = st.session_state['diagnostics']
+                this_fig = compare_simreal_time(diagnostics)
+                # Plot
+                # st.pyplot(this_fig)
+                # fig_html = mpld3.fig_to_html(this_fig)
+                # st_components.html(fig_html, height=1200)
+                st.plotly_chart(this_fig)
+
 
     
