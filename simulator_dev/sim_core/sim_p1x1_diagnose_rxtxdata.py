@@ -35,7 +35,8 @@ ENV_FILE = os.path.join(ROOT, ENV_FILE)
 
 # -- scripts --
 class DiagnoseData():
-    def __init__(self, 
+    def __init__(self,
+                 target_beacon_id=None,
                  real_gateway_id='',
                  beacon_data={},
                  gateway_df={},
@@ -43,9 +44,14 @@ class DiagnoseData():
                  start_time=datetime.datetime.now()-datetime.timedelta(seconds=3600),
                  end_time=datetime.datetime.now()):
         self.start_end_time = start_time, end_time
+        print(self.start_end_time)
         #
-        self.target_beacon_id = [id for id in beacon_data]
-        self.beacon_data = beacon_data[self.target_beacon_id[0]]
+        if target_beacon_id is None:
+            self.target_beacon_ids = [id for id in beacon_data]
+            self.target_beacon_id = self.target_beacon_ids[0]
+        else:
+            self.target_beacon_id = target_beacon_id
+        self.beacon_data = beacon_data[self.target_beacon_id]
         #
         beacon_df = beacon_df.rename(columns={'measure_value::double': 'rssi'})
         self.beacon_df = beacon_df
@@ -64,7 +70,7 @@ class DiagnoseData():
             print('Failed at mac filter')
             return False
         # 1: check start, end time matches gateway_df and beacon_df
-        self.review_start_end_times()
+        #self.review_start_end_times()
         ret_check = self.apply_time_filters()
         if not ret_check:
             print('Failed at time filter')
@@ -78,7 +84,7 @@ class DiagnoseData():
     
     # -- checks: specify --
     def extract_simulated_beacon(self):
-        latlon = self.beacon_data ['latlon']
+        latlon = self.beacon_data['latlon']
         print('Latlon: ', latlon)
         if not isinstance(latlon, tuple):
             return False
@@ -103,27 +109,36 @@ class DiagnoseData():
     
     def review_start_end_times(self):
         start_time, end_time = self.start_end_time
+        print(start_time, end_time)
         new_start_time = max([self.real_gateway_df.time.min(), self.real_beacon_df.time.min()])
         if new_start_time.time() > start_time:
             if VERBOSE:
-                print('Generate new test start/end time:', new_start_time)
-            start_time = new_start_time
-            end_time = start_time + datetime.timedelta(seconds=3600)
-            self.start_end_time = start_time.time(), end_time.time()
+                print('Generate new test start time:', new_start_time)
+            new_start_time = new_start_time.time()
+        #
+        new_end_time = min([self.real_gateway_df.time.max(), self.real_beacon_df.time.max()])
+        if new_end_time.time() < end_time:
+            if VERBOSE:
+                print('Generate new test end time:', new_start_time)            
+            new_end_time = new_end_time.time()
+        self.tight_start_end_time = new_start_time, new_end_time
     
     def apply_time_filters(self):
         start_time, end_time = self.start_end_time
+        print(start_time, end_time)
         if VERBOSE:
             print(f'Analysis from {start_time} to {end_time}')
         gateway_df = self.real_gateway_df
         gateway_df['valid'] = gateway_df.time.apply(lambda x: start_time<=x.time()<=end_time)
         self.real_gateway_df = gateway_df[gateway_df['valid']]
+        print('Gateway start, end times: ', self.real_gateway_df.time.min(), self.real_gateway_df.time.max())
         if self.real_gateway_df.shape[0]==0:
             return False
         #
         beacon_df = self.real_beacon_df
         beacon_df['valid'] = beacon_df.time.apply(lambda x: start_time<=x.time()<=end_time)
         self.real_beacon_df = beacon_df[beacon_df['valid']]
+        print('Beacon start, end times: ', self.real_beacon_df.time.min(), self.real_beacon_df.time.max())
         if self.real_beacon_df.shape[0]==0:
             return False
         return True
@@ -150,6 +165,7 @@ class DiagnoseData():
             print(f'time: {et2-et1:.1f}secs')
         # compute rssi
         sim_unified_df = self.real_gateway_df
+        sim_unified_df['sim_id'] = self.target_beacon_id
         sim_unified_df['sim_mac'] = self.simulated_beacon['mac']
         sim_unified_df['rssi_var_tuple'] = sim_unified_df.apply(lambda x: self.calc_rxtx(x), axis=1)
         et3  = time.time()

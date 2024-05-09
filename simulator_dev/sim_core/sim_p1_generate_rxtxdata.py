@@ -133,12 +133,14 @@ class GenerateData(p0.Setup):
                        'accuracy': [], 'gateway_id': [], 'marker_index': []}
         bcn_rssi_data = {'time': [], 'rssi': [], 'gateway_id': [],
                          'beacon_id': [], 'marker_index': []}
-        update_field_data = lambda x_map, y_data: {fld: farr.append(y_data[fld]) for fld, farr in x_map.items()} 
         #
+        gw_notcreated = True
         for bcn_id, bdf in ref_df.items():
             epoch_time = self.sim_start_time
             milestone_start_time = epoch_time
             milestone_time = datetime.timedelta(seconds=0)
+            bcn_time = milestone_start_time + milestone_time
+            gps_time = bcn_time
             for _, row in bdf.iterrows():
                 idx = row.gateway_marker_index
                 milestone_start_time += milestone_time
@@ -154,7 +156,8 @@ class GenerateData(p0.Setup):
                         bcn_rssi = row.rssi + np.random.random_integers(low=-row.rssi_var[0],
                                                                         high=row.rssi_var[1])
                         # gateway - only update if index meets criterion
-                        if ii%GPS_FLEET_UPDATE_INTERVAL == 0:
+                        #if ii%GPS_FLEET_UPDATE_INTERVAL < ADV_INTERVAL:
+                        if gw_notcreated and ((bcn_time-gps_time).total_seconds()>GPS_FLEET_UPDATE_INTERVAL):
                             gps_time = milestone_start_time + milestone_time
                             gps_dlat = DELTA_LATLON*np.random.randn()/2
                             gps_dlon = DELTA_LATLON*np.random.randn()/2
@@ -165,7 +168,6 @@ class GenerateData(p0.Setup):
                             #store gateway data
                             gps_data = {'time': gps_time, 'latitude': gps_lat, 'longitude': gps_lon, 'accuracy': gps_acc,
                                         'gateway_id': gw_id, 'marker_index': idx}   
-                            #gw_gps_data = update_field_data(gw_gps_data, gps_data)
                             for fld, val in gps_data.items():
                                 gw_gps_data[fld].append(val)
                     else:
@@ -173,25 +175,30 @@ class GenerateData(p0.Setup):
                                                                             high=row.rssi_var[1])
                         bcn_rssi = row.rssi + bcn_drssi
                         #
-                        gps_dlat = row.Delta_lat_rate*ii + DELTA_LATLON*np.random.randn()/2
-                        gps_dlon = row.Delta_lon_rate*ii + DELTA_LATLON*np.random.randn()/2
-                        gps_lat = row.latitude + gps_dlat
-                        gps_lon = row.longitude + gps_dlon
-                        loc_err = (gps_dlat, gps_dlon)
-                        gps_acc = util.haversine_distance(loc_err, (0, 0))
-                        #store gateway data
-                        gps_data = {'time': gps_time, 'latitude': gps_lat, 'longitude': gps_lon, 'accuracy': gps_acc,
-                                    'gateway_id': gw_id, 'marker_index': idx}
-                        # gw_gps_data = update_field_data(gw_gps_data, gps_data)
-                        for fld, val in gps_data.items():
-                            gw_gps_data[fld].append(val)
+                        if gw_notcreated:
+                            gps_time = milestone_start_time + milestone_time
+                            gps_lat_err = DELTA_LATLON*np.random.randn()/2
+                            gps_lon_err = DELTA_LATLON*np.random.randn()/2
+                            gps_dlat = row.Delta_lat_rate*ii + gps_lat_err
+                            gps_dlon = row.Delta_lon_rate*ii + gps_lon_err
+                            gps_lat = row.latitude + gps_dlat
+                            gps_lon = row.longitude + gps_dlon
+                            loc_err = gps_lon_err, gps_lat_err
+                            gps_acc = util.haversine_distance(loc_err, (0, 0))
+                            #store gateway data
+                            gps_data = {'time': gps_time, 'latitude': gps_lat, 'longitude': gps_lon, 'accuracy': gps_acc,
+                                        'gateway_id': gw_id, 'marker_index': idx}
+                            for fld, val in gps_data.items():
+                                gw_gps_data[fld].append(val)
                     # beacon data
                     bcn_time = milestone_start_time + milestone_time
-                    beacon_data = {'time': bcn_time, 'rssi': bcn_rssi, 'gateway_id': gw_id, 'beacon_id': bcn_id, 'marker_index': idx}
-                    # bcn_rssi_data = update_field_data(bcn_rssi_data, beacon_data)
-                    # bcn_rssi_data = {fld: bcn_rssi_data[fld].append(val) for fld, val in beacon_data.items()}
+                    beacon_data = {'time': bcn_time, 'rssi': bcn_rssi, 'gateway_id': gw_id, 'beacon_id': bcn_id, 'marker_index': idx}                    
+                    #
                     for fld, val in beacon_data.items():
                         bcn_rssi_data[fld].append(val)
+        
+            # update gw_created tag
+            gw_notcreated = False
         # create
         bcn_df = pd.DataFrame.from_dict(bcn_rssi_data)
         bcn_df = bcn_df.reset_index()
@@ -209,18 +216,25 @@ class GenerateData(p0.Setup):
                             'beacon_id': 'Tracker ID'}        
         gateway_fields = ['Accuracy','Device ID','ID','Latitude','Longitude','Time','X','Y','Z']
         gateway_field_map = {'accuracy': 'Accuracy',
-                              'gateway_id': 'Device ID',
-                              'index': 'ID',
-                              'latitude': 'Latitude',
-                              'longitude': 'Longitude',
-                              'time': 'Time'
-                              }
+                             'gateway_id': 'Device ID',
+                             'index': 'ID',
+                             'latitude': 'Latitude',
+                             'longitude': 'Longitude',
+                             'time': 'Time'
+                             }
         beacon_df = self.beacon_df[list(beacon_field_map.keys())]
+        # apply rouding
+        beacon_df['rssi'] = beacon_df['rssi'].round(2)
+        beacon_df['time'] = beacon_df.time.apply(lambda x: x.replace(microsecond=1).isoformat())
         beacon_df = beacon_df.rename(columns=beacon_field_map)
         beacon_df.set_index('Gateway ID', inplace=True)
         beacon_df.to_csv(os.path.join(csvpath, 'test_beacon.csv'))
         #
         gateway_df = self.gateway_df[list(gateway_field_map.keys())]
+        gateway_df['accuracy'] = gateway_df['accuracy'].round(2)
+        gateway_df['latitude'] = gateway_df['latitude'].round(8)
+        gateway_df['longitude'] = gateway_df['longitude'].round(8)
+        gateway_df['time'] = gateway_df.time.apply(lambda x: x.replace(microsecond=1).isoformat())
         gateway_df = gateway_df.rename(columns=gateway_field_map)
         gateway_df['X'] = ''
         gateway_df['Y'] = ''

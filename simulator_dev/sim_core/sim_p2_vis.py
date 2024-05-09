@@ -14,6 +14,7 @@ import numpy as np
 #
 import datetime as dt
 from datetime import datetime
+import pytz 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import mpld3
@@ -27,6 +28,9 @@ import sim_p1x1_diagnose_rxtxdata as p1x1
 import segno
 import io
 from PIL import Image
+
+# settings
+TIMEZONE = 'Europe/London'
 
 # paths
 ROOT = os.getcwd()
@@ -187,19 +191,32 @@ def get_beacon_id_str(pre, idx):
     return beacon_id
 
 # --- show plots
-def compare_simreal_time(diagnostics):
+def compare_simreal_time(diagnostics,
+                         tight_axes=True):
     # raw timeseries compare
     sim_df = diagnostics.simbeacon_realgw_df
-    sim_bid = sim_df.sim_mac.iloc[0]
     real_df = diagnostics.real_beacon_df
+    sim_id = sim_df.sim_id.iloc[0]
     real_bid = real_df.beacon.iloc[0]
+    if tight_axes:
+        diagnostics.review_start_end_times()
+        tight_start_time, tight_end_time = diagnostics.tight_start_end_time
+        sim_df['valid'] = sim_df.time.apply(lambda x: tight_start_time<=x.time()<=tight_end_time)
+        sim_df = sim_df[sim_df['valid']]
+        real_df['valid'] = real_df.time.apply(lambda x: tight_start_time<=x.time()<=tight_end_time)
+        real_df = real_df[real_df['valid']]
     #
-    fig, axes = plt.subplots(nrows=2, figsize=(15,10), sharex=True, sharey=True)
+    sim_df['rssi_av'] = sim_df.rssi_var_tuple.apply(lambda x: x[0])
+    #
+    fig, axes = plt.subplots(nrows=2, figsize=(15, 10), sharex=True, sharey=True)
     ax = axes[0]
-    ax.plot(sim_df.time, sim_df.rssi, 'r', marker='o')#, color='Simulated')
-    ax.set_title(f'Simulated Beacon ', fontsize=30)#: {sim_bid}')
+    ax.plot(sim_df.time, sim_df.rssi, 'r', marker='o', alpha=0.65)
+    if st.session_state['sim_median_curve']:
+        ax.plot(sim_df.time, sim_df.rssi_av, 'r', color='b')
+    sim_lbl = f'Simulated Beacon : Test-Beacon-{sim_id}'
+    ax.set_title(sim_lbl, fontsize=30)
     ax.grid('on')
-    ax.legend()
+    # ax.legend()
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b %H:%M"))
     plt.setp(ax.get_yticklabels(),
                 fontsize = 20,
@@ -211,7 +228,9 @@ def compare_simreal_time(diagnostics):
     ax.set_ylabel('rssi / dBm', fontsize=20)
     ax = axes[1]
     this_lbl = f'Real Beacon : {real_bid}'
-    ax.plot(real_df.time, real_df.rssi, 'k', marker='o')#, label=this_lbl)
+    ax.plot(real_df.time, real_df.rssi, 'k', marker='o', alpha=0.65)#, label=this_lbl)
+    if st.session_state['sim_median_curve']:
+        ax.plot(sim_df.time, sim_df.rssi_av, 'r', color='b')
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b %H:%M"))
     plt.setp(ax.get_xticklabels(), rotation=90,
                 fontsize = 20,
@@ -312,9 +331,6 @@ with st.sidebar:
         st.header("Selectables")
         site_name = st.selectbox("Site: ", SITE.keys(), index=0, key="site")
         site_code = SITE[site_name]
-        # filter_type = st.selectbox("Filter on..: ", FILTERS.keys(), index=0, key="filter")
-        # this_filter = FILTERS[filter_type]
-        # st.session_state["filters"] = this_filter
         if site_name != st.session_state["prior_site"]:
             st.session_state["prior_site"] = st.session_state["site"]
         # Actions
@@ -330,7 +346,14 @@ with st.sidebar:
         st.header("Simulation Parameters")    
         this_date = st.date_input("Start Date", datetime.today(), key='start_date')
         this_time = st.time_input("Start Time", datetime.now(), key='start_time')
-        st.session_state['sim_start_timestamp'] = datetime.combine(this_date, this_time).replace(tzinfo=dt.timezone.utc)
+        this_timezone = pytz.timezone(TIMEZONE)
+        this_datetime = datetime.combine(this_date, this_time)
+        this_datetime_tz = this_timezone.localize(this_datetime)
+        #this_datetime_utc = this_datetime.replace(tzinfo=dt.timezone.utc)
+        this_datetime_inutc = this_datetime_tz.astimezone(pytz.utc)
+        st.session_state['sim_start_timestamp'] = this_datetime_tz #inutc
+        st.write('Sim Start: Local time', st.session_state['sim_start_timestamp'] )
+        st.write('Sim Start: in UTC', this_datetime_inutc)
         st.header('Current Settings')
         ts = st.session_state['sim_start_timestamp']
         st.write(f'Sim Start Time: {ts}') 
@@ -344,9 +367,17 @@ with tab_build:
         if 'prior_site' in st.session_state:
             # Wait till we get a session started
             st.header("Generate Markers: {0}".format( st.session_state["site"]))
-            LATLON = get_site_latlon(st.session_state["site"])
+            if 'device' in st.session_state:
+                ll_dev = st.session_state["device"]
+            else:
+                ll_dev = DEVICES[0]
+            dev_latlonlist = st.session_state["clicked_latlon"][ll_dev]
+            if len(dev_latlonlist)>0:
+                LATLON = dev_latlonlist[-1]
+            else:
+                LATLON = get_site_latlon(st.session_state["site"])
             #
-            st.select_slider('Zoom Levels', options=[i for i in range(10,20)], key='zoom_level')
+            st.select_slider('Zoom Levels', options=[i for i in range(15, 20)], value=17, key='zoom_level')
             m = folium.Map(location=list(LATLON), zoom_start=st.session_state['zoom_level'], width=700)
             # actions
             if st.session_state['action'] == 'Generate':
@@ -371,11 +402,12 @@ with tab_build:
                     clr = DEV_CLR[dev_type]
                     this_icon=folium.Icon(color=clr, icon=icon_type)
                     folium.Marker(
-                                    list(this_latlon),  icon=this_icon, tooltip=ttl, 
+                                    list(this_latlon),  
+                                    icon=this_icon, tooltip=ttl, 
                                     popup=this_latlon
                                     ).add_to(m)
                     m.add_child(folium.LatLngPopup())
-            mapdata = st_folium(m, height=700, width=700)
+            mapdata = st_folium(m, height=1400, width=1400)
             #
             st.session_state['folium_map'] = m
             st.session_state['mapdata'] = mapdata
@@ -387,10 +419,7 @@ with tab_build:
                 st.session_state["clicked_latlon"][st.session_state["device"]].append(this_latlon)
             if st.button('Compute'):
                 beacon_coord_list = st.session_state["clicked_latlon"]['Beacon']
-                print(beacon_coord_list)
                 beacon_coord_map = {get_beacon_id_str(st.session_state['beacon_prefix'], bid): coord for bid, coord in enumerate(beacon_coord_list)}
-                print(list(beacon_coord_map.keys()))
-                # beacon_coord_map = {st.session_state['beacon_prefix']+str(bid): coord for bid, coord in enumerate(beacon_coord_list)}
                 gateway_markers = st.session_state["clicked_latlon"]['Gateway']
                 gateway_coords_dict = {st.session_state['gateway_prefix']+str(GATEWAY_ID): gateway_markers}
                 gendata = p1.GenerateData(beacon_coords=beacon_coord_map,
@@ -424,8 +453,8 @@ with tab_build:
                                 ha="right");
                     ax.set_title(f'Beacon : {bid}')
                     ax.grid('on')
-                    ax.legend()
-                    ax.set_ylim([-95, -30])
+                    ax.legend();
+                    ax.set_ylim([-95, -20])
                     ax.set_ylabel('rssi / dBm')
                     st.pyplot(fig)
 
@@ -473,6 +502,8 @@ with tab_import:
             beacon_list = [bid for bid in beacon_list if bid[:2]=='BC']
             #
             import_col1, import_col2 = st.columns(2)
+            draw_col1, draw_col2 = st.columns(2)
+            #
             with import_col1:
                 this_gateway_id = st.selectbox('Select gateway to review', gateway_list, key='review_gateway', index=0)
                 gateway_df = gateway_df[gateway_df.gateway==this_gateway_id]
@@ -500,47 +531,53 @@ with tab_import:
                 # show map
                 LATLON = gps_milestones_df.latitude.mean(), gps_milestones_df.longitude.mean()
                 #
-            st.select_slider('Zoom Levels', options=[i for i in range(10,20)], key='zoom_level_import')
-            m = folium.Map(location=list(LATLON), zoom_start=st.session_state['zoom_level_import'], width=700)
-            #
-            N = gps_milestones_df.shape[0]
-            num_label = {idx: 'start' if (idx == 0) else 'end' if idx==(N-1) else 'mid' for idx in range(N)}            
-            coordinates = []
-            for idx, row in gps_milestones_df.iterrows():
-                this_latlon = row.latitude, row.longitude
-                coordinates.append(list(this_latlon))
-                icon_type = GW_ICON_TYPES[num_label[idx]]
-                icon_clr = GW_ICON_CLRS[num_label[idx]]
-                this_hhmmss = str(row.time.time())[:8]
-                this_date = row.time.date().strftime('%B %d')
-                # this_hhmm = time.strftime('%H:%M', row.time)
-                ttl = f'{this_date}@{this_hhmmss}, <br> Marker{idx} <br> ID={this_gateway_id}'
-                clr = DEV_CLR['Gateway']
-                if num_label[idx] != 'mid':
-                    this_icon=folium.Icon(color=icon_clr, icon=icon_type)
-                    folium.Marker(
-                                list(this_latlon),  icon=this_icon,
-                                tooltip=ttl, #this_latlon,
-                                popup=this_latlon
+            with draw_col1:
+                st.select_slider('Zoom Levels', options=[i for i in range(10,20)], key='zoom_level_import')
+                m = folium.Map(location=list(LATLON), zoom_start=st.session_state['zoom_level_import'], width=700)
+                #
+                N = gps_milestones_df.shape[0]
+                num_label = {idx: 'start' if (idx == 0) else 'end' if idx==(N-1) else 'mid' for idx in range(N)}            
+                coordinates = []
+                for idx, row in gps_milestones_df.iterrows():
+                    this_latlon = row.latitude, row.longitude
+                    coordinates.append(list(this_latlon))
+                    icon_type = GW_ICON_TYPES[num_label[idx]]
+                    icon_clr = GW_ICON_CLRS[num_label[idx]]
+                    this_hhmmss = str(row.time.time())[:8]
+                    this_date = row.time.date().strftime('%B %d')
+                    # this_hhmm = time.strftime('%H:%M', row.time)
+                    ttl = f'{this_date}@{this_hhmmss}, <br> Marker{idx} <br> ID={this_gateway_id}'
+                    clr = DEV_CLR['Gateway']
+                    if num_label[idx] != 'mid':
+                        this_icon=folium.Icon(color=icon_clr, icon=icon_type)
+                        folium.Marker(
+                                    list(this_latlon),  icon=this_icon,
+                                    tooltip=ttl, #this_latlon,
+                                    popup=this_latlon
+                                    ).add_to(m)
+                    else:
+                        folium.CircleMarker(list(this_latlon),
+                                            raidus=10,
+                                            opacity=0.5,
+                                            color=clr,
+                                            fill_color=clr,
+                                            popup=this_latlon,
+                                            tooltip=ttl
+                                            ).add_to(m)
+                    m.add_child(folium.LatLngPopup())
+                #
+                sel_col1, sel_col2 = st.columns(2)
+                with sel_col1:
+                    st.checkbox('Show Connector', key='show_connector')
+                with sel_col2:
+                    st.checkbox('Show Static Markers', key='show_static_text')
+                if st.session_state['show_connector']:
+                    folium.PolyLine(
+                                 locations=coordinates,
+                                 color="#FF0000",
+                                 weight=2,
+                                 tooltip="Connect the dots",
                                 ).add_to(m)
-                else:
-                    folium.CircleMarker(list(this_latlon),
-                                        raidus=10,
-                                        opacity=0.5,
-                                        color=clr,
-                                        fill_color=clr,
-                                        popup=this_latlon,
-                                        tooltip=ttl
-                                        ).add_to(m)
-                m.add_child(folium.LatLngPopup())
-            #
-            if st.checkbox('Show Connector'):
-                folium.PolyLine(
-                                locations=coordinates,
-                                color="#FF0000",
-                                weight=2,
-                                tooltip="Connect the dots",
-                            ).add_to(m)
             # add beacons
             with import_col2:
                 add_beacons_numbers = st.text_input('# of Beacons to add', '0')
@@ -575,7 +612,9 @@ with tab_import:
                     beacon_data = st.session_state["imported_beacon_data"]
                     this_beacon_data = beacon_data[import_beacon_number]
                     st_time = time.time()
+                    st.write(st.session_state["import_start_time"], st.session_state["import_end_time"])
                     diagnostics = p1x1.DiagnoseData(
+                                                target_beacon_id=st.session_state['import_num_beacons'],
                                                 real_gateway_id=st.session_state["review_gateway"],
                                                 beacon_data=st.session_state["imported_beacon_data"],
                                                 gateway_df=gateway_df,
@@ -601,25 +640,45 @@ with tab_import:
                     real_bcn_mac = bcn_data['real_mac']
                     icon_type = BEACON_ICON_TYPES[0]
                     ttl = f'Beacon Name={bcn_name}, <br> Mac={bcn_mac}, <br> Real Mac={real_bcn_mac}'
+                    static_bcn_name = bcn_name.replace('-','_')
+                    static_ttl = f'{static_bcn_name}, <br> lat={bcn_latlon[0]}, <br> lon={bcn_latlon[1]}'
                     clr = DEV_CLR['Beacon']
                     this_icon=folium.Icon(color=clr, icon=icon_type)
                     folium.Marker(
                                     list(bcn_latlon),  icon=this_icon, tooltip=ttl,
                                     popup=bcn_latlon
                                     ).add_to(m)
+                    if st.session_state['show_static_text']:
+                        folium.Marker(
+                                    list(bcn_latlon),  
+                                    icon=folium.DivIcon(
+                                            html=f'<div style="font-size: 10pt">{static_ttl}</div>',
+                                            )
+                                        ).add_to(m)
                 
             #
-            mapdata = st_folium(m, height=1000, width=1000)
+            with draw_col1:
+                mapdata = st_folium(m, height=1000, width=1000)
 
             # diagnostics.compare_sims_vs_real()
-            if 'diagnostics' in st.session_state:
-                diagnostics = st.session_state['diagnostics']
-                this_fig = compare_simreal_time(diagnostics)
-                # Plot
-                # st.pyplot(this_fig)
-                # fig_html = mpld3.fig_to_html(this_fig)
-                # st_components.html(fig_html, height=1200)
-                st.plotly_chart(this_fig)
+            with draw_col2:    
+                if 'diagnostics' in st.session_state:
+                    opt_col1, opt_col2, opt_col3 = st.columns(3)
+                    with opt_col1:
+                        st.checkbox('Tight axes', key='tight_axes')
+                    with opt_col2:
+                        st.checkbox('Show Simulated Median', key='sim_median_curve')
+                    with opt_col3:
+                        st.checkbox('Show Interactive Plot', key='show_interactive')
+
+                    diagnostics = st.session_state['diagnostics']
+                    this_fig = compare_simreal_time(diagnostics,
+                                                    tight_axes=st.session_state['tight_axes'])
+                    if st.session_state['show_interactive']:
+                        st.plotly_chart(this_fig)
+                    else:
+                        st.pyplot(this_fig)
+
 
 
     
