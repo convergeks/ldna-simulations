@@ -12,6 +12,7 @@ import datetime
 sys.path.append(os.getcwd())
 import sim_core.sim_p0_setupdevices as p0
 import utils.util_routine_calcs as util
+import utils.util_matlab_tools as matutil
 
 # Settings
 ADV_INTERVAL = 3
@@ -29,9 +30,14 @@ class GenerateData(p0.Setup):
     def __init__(self, 
                  beacon_coords={},
                  gateway_coords={},
-                 start_time=datetime.datetime.now()):
+                 override_gateway_height_m=None,
+                 start_time=datetime.datetime.now(),
+                 osm_map = None
+                 ):
         # time
         self.sim_start_time = start_time
+        self.OSMFile = osm_map
+        self.override_gateway_height_m = override_gateway_height_m
         # init
         st = time.time()
         super().__init__(beacon_coords=beacon_coords)
@@ -49,38 +55,95 @@ class GenerateData(p0.Setup):
         # 
         self.generate_milestone_enabling_data()
         self.generate_full_timeseries()
+        self.close_matlab_engine()
         e4 = time.time()
         print(f'e4={e4-st:.2f}secs')
 
     def init_matlab(self):
         self.matlab_engine = matlab.engine.start_matlab()
-        self.OSMFile = os.path.join(self.config['ROOT'], self.config['OSM_Map'])
+        self.osm_rssi_data = {}
+        #self.OSMFile = os.path.join(self.config['ROOT'], self.config['OSM_Map'])
+
+    def close_matlab_engine(self):
+        self.matlab_engine.quit()
         
     # -- Gateway --
     def init_gateways(self, gateway_coords={}):
         self.gateway_locations = gateway_coords
 
+    # -- OSM Map Based coverage calcs --
+    def calc_osm_coverage(self, beacon_name, beacon_tx):
+        #
+        eng = self.matlab_engine
+        model_name  = "longley-rice"
+        var_name  = "SituationVariabilityTolerance"
+        rtLongleyRice_SitVarMid= eng.propagationModel(model_name, var_name, 0.55)
+        #
+        viewer = eng.siteviewer('Buildings', self.OSMFile,
+                                'Basemap', "topographic")
+        data_out  = eng.coverage(beacon_tx, rtLongleyRice_SitVarMid,
+                                 'MaxRange', 250)
+        #bcn_data_field = f'{beacon_name}_mdl'
+        #eng.workspace[bcn_data_field] = data_out
+        eng.workspace["this_mdl"] = data_out
+        #
+        osm_rssi_data = {'Latitude': [], 'Longitude': [], 'Power': []}
+        osm_rssi_data['Latitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Latitude"))
+        osm_rssi_data['Longitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Longitude"))
+        osm_rssi_data['Power'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Power"))
+        osm_rssi_data_df = pd.DataFrame.from_dict(osm_rssi_data)
+        self.osm_rssi_data[beacon_name] = osm_rssi_data_df
+
+    def calc_rssi_from_osm_coverage(self, beacon_name, this_rx):
+        #
+        eng = self.matlab_engine
+        this_df = self.osm_rssi_data[beacon_name]
+        eng.workspace['rx'] = this_rx
+        rx_lonlat = eng.eval("rx.Longitude"), eng.eval("rx.Latitude")
+        # estimated ss
+        this_df['rx_dist'] = this_df.apply(lambda x: util.haversine_distance((x.Longitude, x.Latitude), rx_lonlat), axis=1)
+        nearest_idx = this_df['rx_dist'].argmin()
+        nearest_data = this_df.iloc[nearest_idx]
+        #
+        rssi = nearest_data.Power
+        dist = util.get_RSSI_to_distance_estimate(rssi)
+        dist_err = nearest_data.rx_dist
+        # placeholder
+        rssi_pm = (5, 5)
+        dist_pm = (dist_err, dist_err)
+        return rssi, rssi_pm, dist, dist_pm
+  
     # -- Analyse for beacons and gateways --
     def analyse_beacons_gateways(self):
-        rssi_gps_dict = {'gateway_marker_index':[],
-                          'beacon_id': [],
-                          'gateway_id': [],
-                          'rssi': [],
-                          'rssi_var': [],
-                          'beacon_lonlat': [],
-                          'gateway_lonlat': [],
-                          'distance': [],
-                          'distance_err': [],
-                          'gps_acc': [],
-                          }
+        rssi_gps_dict = {'gateway_marker_index': [],
+                         'beacon_id': [],
+                         'gateway_id': [],
+                         'rssi': [],
+                         'rssi_var': [],
+                         'beacon_lonlat': [],
+                         'gateway_lonlat': [],
+                         'distance': [],
+                         'distance_err': [],
+                         'gps_acc': [],
+                        }
         for bid, blatlon in self.beacon_structure.items():
             blonlat = blatlon[1], blatlon[0]
             tx = self.get_tx(blonlat)
+            if self.OSMFile is not None:
+                self.calc_osm_coverage(beacon_name=bid,
+                                       beacon_tx=tx)
             for gid, gmarkers in self.gateway_locations.items():
+                # DEBUG:
                 for idx, glatlon in enumerate(gmarkers):
+                    if idx==3: 
+                        print('start debugging for beacon id=', bid)
                     glonlat = glatlon[1], glatlon[0]
                     rx = self.get_rx(lonlat=glonlat)
-                    res = self.calc_txsignal(rx, tx)
+                    if self.OSMFile is not None:
+                        res = self.calc_rssi_from_osm_coverage(bid, rx)
+                    else:
+                        res = self.calc_txsignal(rx, tx)
+                    #
                     rssi, rssi_pm_err, dist, dist_pm = res
                     gps_acc = np.abs(2 + np.random.randn())
                     rssi_gps_dict['gateway_marker_index'].append(idx)
@@ -94,7 +157,6 @@ class GenerateData(p0.Setup):
                     rssi_gps_dict['distance_err'].append(dist_pm)
                     rssi_gps_dict['gps_acc'].append(gps_acc)
         self.rssi_gps_df = pd.DataFrame.from_dict(rssi_gps_dict)
-        # print(self.rssi_gps_df.head())
 
     def generate_milestone_enabling_data(self, gateway_speed_mps=0.8):
         self.milestones_df = {}
@@ -104,10 +166,6 @@ class GenerateData(p0.Setup):
             df['gateway_status'] = 'Milestone'
             df['gateway_status'].iloc[0] = 'Static'
             df['gateway_status'].iloc[-1] = 'Static'
-            # duration at location@ make first and last resident for 5 mins
-            df['duration_secs'] = 20
-            df['duration_secs'].iloc[0] = 300
-            df['duration_secs'].iloc[-1] = 300
             # lat-long
             df['longitude'] = df.gateway_lonlat.apply(lambda x: np.float(x[0]))
             df['latitude'] = df.gateway_lonlat.apply(lambda x: np.float(x[1]))
@@ -118,12 +176,17 @@ class GenerateData(p0.Setup):
             # compute move rate
             df['Delta_s'] = df.apply(lambda x: util.haversine_distance((x.Delta_lon, x.Delta_lat), (0, 0)), axis=1)
             df['Delta_t'] = df.Delta_s.apply(lambda x: x/gateway_speed_mps)
+            # duration at location@ make first and last resident for 5 mins
+            df['duration_secs'] = df['Delta_t']
+            df['duration_secs'].iloc[0] = 300
+            df['duration_secs'].iloc[-1] = 300
             # compute rate of change of lat/lon
             df['Delta_lat_rate'] = df.apply(lambda x: x.Delta_lat/x.Delta_t, axis=1)
             df['Delta_lon_rate'] = df.apply(lambda x: x.Delta_lon/x.Delta_t, axis=1)
             # compute rssi change
-            df['rssi_delta'] = df.rssi.diff()
-            df['rssi_delta'].iloc[0] = 2.5
+            df['rssi_delta'] = df.rssi.diff(periods=-1)
+            df['rssi_delta'].iloc[-1] = 2.5
+            df['Delta_rssi_rate'] = df.apply(lambda x: x.rssi_delta/x.Delta_t, axis=1)
             #
             self.milestones_df[bid] = df
 
@@ -131,8 +194,10 @@ class GenerateData(p0.Setup):
         ref_df = self.milestones_df
         gw_gps_data = {'time': [], 'latitude': [], 'longitude': [],
                        'accuracy': [], 'gateway_id': [], 'marker_index': []}
-        bcn_rssi_data = {'time': [], 'rssi': [], 'gateway_id': [],
-                         'beacon_id': [], 'marker_index': []}
+        bcn_rssi_data = {'time': [], 
+                         'rssi': [], 'distance': [], 
+                         'gateway_id': [], 'beacon_id': [], 
+                         'marker_index': []}
         #
         gw_notcreated = True
         for bcn_id, bdf in ref_df.items():
@@ -140,12 +205,16 @@ class GenerateData(p0.Setup):
             milestone_start_time = epoch_time
             milestone_time = datetime.timedelta(seconds=0)
             bcn_time = milestone_start_time + milestone_time
+            bcn_latlon = self.beacon_structure[bcn_id]
+            bcn_lonlat = bcn_latlon[1], bcn_latlon[0]
             gps_time = bcn_time
             for _, row in bdf.iterrows():
                 idx = row.gateway_marker_index
+                gps_lat = row.latitude
+                gps_lon = row.longitude
                 milestone_start_time += milestone_time
                 # milestone_time = 0
-                for ii in range(1, row.duration_secs, ADV_INTERVAL):
+                for ii in range(1, int(row.duration_secs), ADV_INTERVAL):
                     # update miestone time
                     milestone_time = datetime.timedelta(seconds=ii)
                     gw_id = row.gateway_id
@@ -171,8 +240,8 @@ class GenerateData(p0.Setup):
                             for fld, val in gps_data.items():
                                 gw_gps_data[fld].append(val)
                     else:
-                        bcn_drssi = row.rssi_delta + np.random.random_integers(low=-row.rssi_var[0],
-                                                                            high=row.rssi_var[1])
+                        bcn_drssi = -row.Delta_rssi_rate*ii + np.random.random_integers(low=-row.rssi_var[0],
+                                                                                        high=row.rssi_var[1])
                         bcn_rssi = row.rssi + bcn_drssi
                         #
                         if gw_notcreated:
@@ -192,7 +261,13 @@ class GenerateData(p0.Setup):
                                 gw_gps_data[fld].append(val)
                     # beacon data
                     bcn_time = milestone_start_time + milestone_time
-                    beacon_data = {'time': bcn_time, 'rssi': bcn_rssi, 'gateway_id': gw_id, 'beacon_id': bcn_id, 'marker_index': idx}                    
+                    gps_bcn_dist = util.haversine_distance((gps_lon, gps_lat), bcn_lonlat)
+                    beacon_data = {'time': bcn_time, 
+                                   'rssi': bcn_rssi, 
+                                   'distance': gps_bcn_dist,
+                                   'gateway_id': gw_id, 
+                                   'beacon_id': bcn_id, 
+                                   'marker_index': idx}                    
                     #
                     for fld, val in beacon_data.items():
                         bcn_rssi_data[fld].append(val)
@@ -299,7 +374,11 @@ class GenerateData(p0.Setup):
     def get_rx(self, lonlat):
         #   receiver 
         eng = self.matlab_engine
-        gateway_RxHeight = self.config['RxHeight']
+        if self.override_gateway_height_m is None:
+            gateway_RxHeight = self.config['RxHeight']
+        else:
+            gateway_RxHeight = self.override_gateway_height_m
+        print('Gateway ht: ', gateway_RxHeight)
         rx = eng.rxsite('Name', "Crane Receiver",
                         "Latitude", lonlat[1],
                         "Longitude", lonlat[0],
@@ -344,7 +423,7 @@ class GenerateData(p0.Setup):
         return pl
     
 
-if __name__ == "__main__":
+def simple_test():
     GW_MARKERS = [(53.304499263489, -1.1687564849853518),
                   (53.30513556505881, -1.170376539230347),
                   (53.306544370312125, -1.169400215148926),
@@ -356,3 +435,18 @@ if __name__ == "__main__":
                             gateway_coords={'G1': GW_MARKERS}
                           )
     print(gendata.rssi_gps_df.head())
+
+def debug_call():
+    beacon_coords = {'BC73696D7300': (54.935844050991975, 9.2612544243093), 
+                     'BC73696D7301': (54.935828921958006, 9.26124930381775)}
+    gw_coords = {'gwsimulateG1': [(54.935701318437815, 9.261959588642107), (54.93565017580253, 9.261482656002046), (54.935611652820135, 9.260932803153993), (54.93571335341378, 9.260653853416445), (54.93576112178565, 9.260948896408083), (54.93580580827573, 9.26138073205948), (54.93585357653778, 9.261847436428072), (54.935790399146825, 9.261614084243776), (54.93579194005997, 9.261490702629091), (54.93577653092578, 9.261361956596376), (54.93577695114076, 9.261266616213108)]}
+    start_time = '2024-05-20 14:44:00+01:00'
+    start_time=datetime.datetime.strptime(start_time,'%Y-%m-%d %H:%M:%S%z')
+    osm_map = '/home/kiran/source/Working/logisticsDNA/ldna-simulator/simulator_dev/dump/datasource/OSM/Model_EAP_Sims_Row_PQ_NO_height.osm'
+    gendata = GenerateData(beacon_coords=beacon_coords,
+                           gateway_coords = gw_coords,
+                           start_time = start_time,
+                           osm_map = osm_map)
+    
+if __name__ == "__main__":
+    debug_call()

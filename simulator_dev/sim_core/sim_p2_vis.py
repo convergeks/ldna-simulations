@@ -23,6 +23,8 @@ import plotly.graph_objects as go
 import sim_p0_setupdevices as p0
 import sim_p1_generate_rxtxdata as p1
 import sim_p1x1_diagnose_rxtxdata as p1x1
+#
+import utils.util_osm_tools as uosm
 
 # reg - qrcode
 import segno
@@ -39,7 +41,7 @@ if "sim_core" in ROOT:
 DEFAULT_OUTPATH = os.path.join(ROOT, "dump")
 DEFAULT_CSVPATH = os.path.join(ROOT, "dump/csvfiles")
 DEFAULT_IMPORT_DATAPATH = os.path.join(ROOT, "dump/datasource/dump/Tinglev/datasource/raw")
-
+DEFAULT_IMPORT_OSMPATH = os.path.join(ROOT, "dump/datasource/OSM")
 # ----- options -----
 # site & dates
 SITE = {"CEMC": 0, "Oxford": 1, "Tinglev": 2, "FPMcCann": 3, "Creagh": 4, 'KS': 5}
@@ -62,6 +64,7 @@ GW_ICON_CLRS = {'start': 'black',
 BEACON_ICON_TYPES = ['cog']
 DEV_CLR = {'Gateway': 'green', 'Beacon': 'blue'}
 ACTIONS = ['Generate', 'View']
+DEBUG = False #True
 
 # --- width ---
 def _max_width_(percent_width: int = 75):
@@ -104,7 +107,7 @@ def get_stored_sessionfields():
     session_fields = ['site', 'device', 'action', 'prior_site', 'filters', 'clicked_latlon',
                       'show_markers', 'folium_map', 'mapdata', 'results', 'zoom_level',
                       'start_date', 'start_time', 'sim_start_timestamp', 'load_file',
-                      'gateway_prefix', 'beacon_prefix'
+                      'gateway_prefix', 'beacon_prefix', 'osm_data'
                      ]
     return session_fields
 
@@ -180,6 +183,17 @@ def import_data():
     else :
         return None
     
+def import_osm_file(folder_path=DEFAULT_IMPORT_OSMPATH):
+    filenames = os.listdir(folder_path)
+    osm_files = [f for f in filenames if f[-3:]=='osm']
+    osm_files = sorted(osm_files)
+    osm_filename = st.selectbox('Import OSM File', osm_files, index=0, key='osm_file')
+    if osm_filename != None:
+        osmpbf_filename = osm_filename + '.pbf'
+        st.session_state['osm_data'] = {'osm': os.path.join(folder_path, osm_filename),
+                                        'osm_pbf': os.path.join(folder_path, osmpbf_filename)
+                                        }        
+
 # --- beacon util ===
 def get_beacon_id_str(pre, idx):
     if 10<idx<100:
@@ -296,6 +310,8 @@ with st.sidebar:
                 st.session_state["imported_data"] = {}
                 st.session_state['import_beacon_prefix'] = 'BC' + 'test'.encode('utf-8').hex().upper()
                 st.session_state["imported_beacon_data"] = {}
+                st.session_state['osm_data'] = {}
+                st.session_state['override_gateway_height_m'] = None
         if st.session_state["session_action"] == session_action_list[2]:
             loaded_state = load_session_state()
             if st.button('load'):
@@ -314,20 +330,28 @@ with st.sidebar:
                     st.session_state["imported_beacon_data"] = {}
         if st.session_state["session_action"] == session_action_list[3]:
             st.session_state['import_beacon_prefix'] = 'BC' + 'test'.encode('utf-8').hex().upper()
+            st.session_state['osm_data'] = {}
             data_df_map = import_data()
             if data_df_map is not None:
                 st.write(data_df_map.keys())
                 st.session_state["imported_data"] = data_df_map
-    if 'sel_load_file' in st.session_state:
-        st.write('Session file in Use: {0}'.format(st.session_state['sel_load_file']) )
+    # Process Session Actions
+    st.subheader('Import OSM file')
+    st.checkbox('Load OSM Map File', key='osm_map_load')
+    if st.session_state['osm_map_load']:
+        import_osm_file()
 
-    st.subheader('Session Record')
-    session_file = set_state_filepath()
-    if st.button('Store Existing Session'):
-        save_session_state(this_session_state=st.session_state,
-                            session_file=session_file)
-        
-    if "site" in st.session_state:
+    if ("site" in st.session_state) and (st.session_state["session_action"] != session_action_list[-1]):
+        #
+        if 'sel_load_file' in st.session_state:
+            st.write('Session file in Use: {0}'.format(st.session_state['sel_load_file']) )
+        #
+        st.subheader('Session Record')
+        session_file = set_state_filepath()
+        if st.button('Store Existing Session'):
+            save_session_state(this_session_state=st.session_state,
+                                session_file=session_file)        
+        #
         st.header("Selectables")
         site_name = st.selectbox("Site: ", SITE.keys(), index=0, key="site")
         site_code = SITE[site_name]
@@ -343,6 +367,7 @@ with st.sidebar:
         bcn = st.text_input('Beacon Prefix', 'BC'+ 'sims'.encode('utf-8').hex().upper(), key='beacon_prefix')
         if st.button('Clear All Devices'):
             st.session_state["clicked_latlon"] = {d: [] for d in DEVICES}
+        st.text_input('Gateway Antenna Height',value=1.5, key='override_gateway_height_m')
         st.header("Simulation Parameters")    
         this_date = st.date_input("Start Date", datetime.today(), key='start_date')
         this_time = st.time_input("Start Time", datetime.now(), key='start_time')
@@ -362,9 +387,9 @@ with st.sidebar:
             st.write(dev + ' Markers=' + str(len(dev_markers)))
 
 tab_build, tab_reg, tab_import = st.tabs(["Build Sims", "Register", "Import Gateway Data"])
-with tab_build: 
+with tab_build:
     with st.container():
-        if 'prior_site' in st.session_state:
+        if 'site' in st.session_state:
             # Wait till we get a session started
             st.header("Generate Markers: {0}".format( st.session_state["site"]))
             if 'device' in st.session_state:
@@ -377,18 +402,25 @@ with tab_build:
             else:
                 LATLON = get_site_latlon(st.session_state["site"])
             #
+            st.checkbox('Show Connector', key='build_show_connector')
             st.select_slider('Zoom Levels', options=[i for i in range(15, 20)], value=17, key='zoom_level')
             m = folium.Map(location=list(LATLON), zoom_start=st.session_state['zoom_level'], width=700)
+            if st.session_state['osm_map_load'] and len(st.session_state['osm_data']):
+                pbffilename = st.session_state['osm_data']['osm_pbf']
+                buildings = uosm.util_osm_get_buildings(pbffilename)
+                folium.GeoJson(buildings).add_to(m)
             # actions
             if st.session_state['action'] == 'Generate':
                 dev_marker_dict = {st.session_state["device"]: st.session_state["clicked_latlon"][st.session_state["device"]]}
             else:
                 dev_marker_dict = st.session_state["clicked_latlon"]
-
+            gw_coordinates = []
             for dev_type, dev_markers in dev_marker_dict.items():
                 N = len(dev_markers)
                 num_label = {idx: 'start' if (idx == 0) else 'end' if idx==(N-1) else 'mid' for idx in range(N)}
                 for idx, this_latlon in enumerate(dev_markers):
+                    if dev_type == DEVICES[0]:
+                        gw_coordinates.append(this_latlon)
                     #Setup the content of the popup
                     if dev_type == 'Gateway':
                         icon_type = GW_ICON_TYPES[num_label[idx]]
@@ -407,6 +439,16 @@ with tab_build:
                                     popup=this_latlon
                                     ).add_to(m)
                     m.add_child(folium.LatLngPopup())
+            #
+            if st.session_state['build_show_connector']:
+                if len(gw_coordinates)>0:
+                    folium.PolyLine(
+                                 locations=gw_coordinates,
+                                 color="#FF0000",
+                                 weight=2,
+                                 tooltip="Connect the dots",
+                                ).add_to(m)
+            #
             mapdata = st_folium(m, height=1400, width=1400)
             #
             st.session_state['folium_map'] = m
@@ -422,18 +464,36 @@ with tab_build:
                 beacon_coord_map = {get_beacon_id_str(st.session_state['beacon_prefix'], bid): coord for bid, coord in enumerate(beacon_coord_list)}
                 gateway_markers = st.session_state["clicked_latlon"]['Gateway']
                 gateway_coords_dict = {st.session_state['gateway_prefix']+str(GATEWAY_ID): gateway_markers}
+                if st.session_state['osm_map_load']:
+                    osm_map = st.session_state['osm_data']['osm']
+                else:
+                    osm_map = None
+                if DEBUG:
+                    print('**Start Args: For Debugging Sims**')
+                    print(beacon_coord_map)
+                    print(gateway_coords_dict)
+                    print(st.session_state['sim_start_timestamp'])
+                    print(osm_map)
+                    print('**End Args for Debugging Sims**')
                 gendata = p1.GenerateData(beacon_coords=beacon_coord_map,
                                             gateway_coords=gateway_coords_dict,
-                                            start_time=st.session_state['sim_start_timestamp']
+                                            override_gateway_height_m=np.float(st.session_state['override_gateway_height_m']),
+                                            start_time=st.session_state['sim_start_timestamp'],
+                                            osm_map=osm_map
                                          )
                 gendata.generate_csv_file_bydevice(csvpath=DEFAULT_CSVPATH)
                 st.session_state['results'] = {'rssi_gps': gendata.rssi_gps_df,
                                             'beacon': gendata.beacon_df,
                                             'gateway': gendata.gateway_df
                                             }
-
+            st.checkbox('Store markerwise results', value=False, key='store_sim_results')
             if st.button('Show Results'):
                 all_df = st.session_state['results']['beacon']
+                if st.session_state['store_sim_results']:
+                    this_time = time.time()
+                    gw_data = st.session_state['results']['gateway']
+                    all_df.to_csv(os.path.join(DEFAULT_CSVPATH, f'bcn_results_{this_time}.csv'))
+                    gw_data.to_csv(os.path.join(DEFAULT_CSVPATH, f'gw_results_{this_time}.csv'))
                 for bid, df in all_df.groupby('beacon_id'):
                     clrs = list('cbkry')
                     st.write(df)
@@ -462,7 +522,7 @@ with tab_reg:
     with st.container():
         if ('clicked_latlon' in st.session_state) and ('Beacon' in st.session_state["clicked_latlon"]):
             beacon_coord_list = st.session_state["clicked_latlon"]['Beacon']
-            if len(beacon_coord_list)>0:
+            if (len(beacon_coord_list)>0) and ('beacon_prefix' in st.session_state):
                 beacon_coord_map = {get_beacon_id_str(st.session_state['beacon_prefix'], bid): coord for bid, coord in enumerate(beacon_coord_list)}
                 beacon_ids = list(beacon_coord_map.keys())
                 sel_beacon = st.selectbox('Select beacon', beacon_ids)
@@ -499,7 +559,7 @@ with tab_import:
             gateway_list = sorted(gateway_df.gateway.unique())
             beacon_df = data_df['beacon']
             beacon_list = sorted(beacon_df.beacon.unique())
-            beacon_list = [bid for bid in beacon_list if bid[:2]=='BC']
+            beacon_list = [bid for bid in beacon_list if bid[:2] in ['DD', 'BC']]
             #
             import_col1, import_col2 = st.columns(2)
             draw_col1, draw_col2 = st.columns(2)
@@ -534,6 +594,10 @@ with tab_import:
             with draw_col1:
                 st.select_slider('Zoom Levels', options=[i for i in range(10,20)], key='zoom_level_import')
                 m = folium.Map(location=list(LATLON), zoom_start=st.session_state['zoom_level_import'], width=700)
+                if st.session_state['osm_map_load'] and len(st.session_state['osm_data']):
+                    pbffilename = st.session_state['osm_data']['osm_pbf']
+                    buildings = uosm.util_osm_get_buildings(pbffilename)
+                    folium.GeoJson(buildings).add_to(m)
                 #
                 N = gps_milestones_df.shape[0]
                 num_label = {idx: 'start' if (idx == 0) else 'end' if idx==(N-1) else 'mid' for idx in range(N)}            
@@ -572,7 +636,8 @@ with tab_import:
                 with sel_col2:
                     st.checkbox('Show Static Markers', key='show_static_text')
                 if st.session_state['show_connector']:
-                    folium.PolyLine(
+                    if len(coordinates)>0:
+                        folium.PolyLine(
                                  locations=coordinates,
                                  color="#FF0000",
                                  weight=2,
@@ -613,6 +678,10 @@ with tab_import:
                     this_beacon_data = beacon_data[import_beacon_number]
                     st_time = time.time()
                     st.write(st.session_state["import_start_time"], st.session_state["import_end_time"])
+                    if st.session_state['osm_map_load']:
+                        osm_map = st.session_state['osm_data']['osm']
+                    else:
+                        osm_map = None
                     diagnostics = p1x1.DiagnoseData(
                                                 target_beacon_id=st.session_state['import_num_beacons'],
                                                 real_gateway_id=st.session_state["review_gateway"],
@@ -620,7 +689,8 @@ with tab_import:
                                                 gateway_df=gateway_df,
                                                 beacon_df=beacon_df,
                                                 start_time=st.session_state["import_start_time"],
-                                                end_time=st.session_state["import_end_time"]
+                                                end_time=st.session_state["import_end_time"],
+                                                osm_map = osm_map
                                                 )
                     st.write(diagnostics.valid_checks)
                     # Analyse
@@ -631,7 +701,7 @@ with tab_import:
                     st.write(f'Simulate: Time taken={et1-et0:.1f}secs')
                     #
                     st.session_state['diagnostics'] = diagnostics
-
+ 
                 #
                 for bcn_num, bcn_data in st.session_state["imported_beacon_data"].items():
                     bcn_name = bcn_data['name']

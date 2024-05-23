@@ -13,6 +13,7 @@ sys.path.append(os.getcwd())
 import sim_core.sim_p0_setupdevices as p0
 import utils.util_routine_calcs as util
 import utils.conversion as conv
+import utils.util_matlab_tools as matutil
 
 # Debug Settings
 VERBOSE = False
@@ -42,9 +43,12 @@ class DiagnoseData():
                  gateway_df={},
                  beacon_df={},
                  start_time=datetime.datetime.now()-datetime.timedelta(seconds=3600),
-                 end_time=datetime.datetime.now()):
+                 end_time=datetime.datetime.now(),
+                 osm_map = None
+                 ):
         self.start_end_time = start_time, end_time
         print(self.start_end_time)
+        self.OSMFile = osm_map
         #
         if target_beacon_id is None:
             self.target_beacon_ids = [id for id in beacon_data]
@@ -143,11 +147,57 @@ class DiagnoseData():
             return False
         return True
     
+    # --- calc from matlab ---
+
+    # -- OSM Map Based coverage calcs --
+    def calc_osm_coverage(self):
+        #
+        beacon_tx = self.beacon_tx
+        #
+        eng = self.matlab_engine
+        model_name  = "longley-rice"
+        var_name  = "SituationVariabilityTolerance"
+        rtLongleyRice_SitVarMid= eng.propagationModel(model_name, var_name, 0.55)
+        #
+        viewer = eng.siteviewer('Buildings', self.OSMFile,
+                                'Basemap', "topographic")
+        data_out  = eng.coverage(beacon_tx, rtLongleyRice_SitVarMid,
+                                 'MaxRange', 250)
+        #bcn_data_field = f'{beacon_name}_mdl'
+        #eng.workspace[bcn_data_field] = data_out
+        eng.workspace["this_mdl"] = data_out
+        #
+        osm_rssi_data = {'Latitude': [], 'Longitude': [], 'Power': []}
+        osm_rssi_data['Latitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Latitude"))
+        osm_rssi_data['Longitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Longitude"))
+        osm_rssi_data['Power'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Power"))
+        osm_rssi_data_df = pd.DataFrame.from_dict(osm_rssi_data)
+        self.osm_rssi_data[self.target_beacon_id] = osm_rssi_data_df
+
+    def calc_rssi_from_osm_coverage(self, this_rx):
+        #
+        eng = self.matlab_engine
+        this_df = self.osm_rssi_data[self.target_beacon_id]
+        eng.workspace['rx'] = this_rx
+        rx_lonlat = eng.eval("rx.Longitude"), eng.eval("rx.Latitude")
+        # estimated ss
+        this_df['rx_dist'] = this_df.apply(lambda x: util.haversine_distance((x.Longitude, x.Latitude), rx_lonlat), axis=1)
+        nearest_idx = this_df['rx_dist'].argmin()
+        nearest_data = this_df.iloc[nearest_idx]
+        #
+        rssi = nearest_data.Power
+        # placeholder
+        rssi_pm = (5, 5)
+        return rssi, rssi_pm
+  
     # -- simulated beacon data --
     def calc_rxtx(self, row):
         glonlat = row.longitude, row.latitude
         rx = self.get_rx(lonlat=glonlat)
-        res, res_var = self.calc_txsignal(rx, self.beacon_tx)
+        if self.OSMFile is not None:
+            res, res_var = self.calc_rssi_from_osm_coverage(rx)
+        else:
+            res, res_var = self.calc_txsignal(rx, self.beacon_tx)
         return res, res_var
 
     def create_simulated_beacon_data(self):
@@ -160,6 +210,10 @@ class DiagnoseData():
         #
         beacon_lonlat = self.simulated_beacon['lonlat']
         self.beacon_tx = self.get_tx(lonlat=beacon_lonlat)
+        #
+        if self.OSMFile is not None:
+            self.calc_osm_coverage()
+        #
         et2  = time.time()
         if VERBOSE:
             print(f'time: {et2-et1:.1f}secs')
@@ -217,7 +271,11 @@ class DiagnoseData():
 
     def start_matlab(self):
         self.matlab_engine = matlab.engine.start_matlab()
-        self.OSMFile = os.path.join(self.config['ROOT'], self.config['OSM_Map'])
+        self.osm_rssi_data = {}
+        # self.OSMFile = os.path.join(self.config['ROOT'], self.config['OSM_Map'])
+
+    def close_matlab_engine(self):
+        self.matlab_engine.quit()
 
     def get_tx(self, lonlat):
         # iterate over the tx positions
