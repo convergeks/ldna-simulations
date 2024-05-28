@@ -16,8 +16,8 @@ Channel39Freq_hz = 2.48e9
 freqChannelHz = {ch37=2.402e9, ch39=2.48e9}
 
 # Instrument Mechanical settings
-RxHeight = 1 #5 # metres
-TxHeight = 1 # metres
+RxHeight = 1.5 # metres
+TxHeight = 1.5 # metres
 Crane_TravelSpeed = 2  # m/s
 Crane_HookDropLiftRate = 0.1 # m/s
 

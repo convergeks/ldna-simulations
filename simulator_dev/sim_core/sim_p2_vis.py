@@ -340,7 +340,7 @@ with st.sidebar:
     st.checkbox('Load OSM Map File', key='osm_map_load')
     if st.session_state['osm_map_load']:
         import_osm_file()
-
+    st.text_input('Gateway Antenna Height',value=1.5, key='override_gateway_height_m')
     if ("site" in st.session_state) and (st.session_state["session_action"] != session_action_list[-1]):
         #
         if 'sel_load_file' in st.session_state:
@@ -367,7 +367,6 @@ with st.sidebar:
         bcn = st.text_input('Beacon Prefix', 'BC'+ 'sims'.encode('utf-8').hex().upper(), key='beacon_prefix')
         if st.button('Clear All Devices'):
             st.session_state["clicked_latlon"] = {d: [] for d in DEVICES}
-        st.text_input('Gateway Antenna Height',value=1.5, key='override_gateway_height_m')
         st.header("Simulation Parameters")    
         this_date = st.date_input("Start Date", datetime.today(), key='start_date')
         this_time = st.time_input("Start Time", datetime.now(), key='start_time')
@@ -571,8 +570,19 @@ with tab_import:
                 # st.write(st.session_state["review_gateway"], this_gateway_id)
 
                 # start, end time
-                import_start_time = st.time_input("Start Time", gateway_df.time.min(), key='import_start_time', step=5*60)
-                import_end_time = st.time_input("End Time", gateway_df.time.max(), key='import_end_time', step=5*60 )
+                intervals_mins = st.text_input('Review in minutes..', 5, key='review_interval_mins')
+                STEPS = np.int(st.session_state['review_interval_mins'] )*60
+                if 'import_start_time' in st.session_state:
+                    st_time = st.session_state['import_start_time']
+                else:
+                    st_time = gateway_df.time.min()
+                if 'import_end_time' in st.session_state:
+                    end_time = st.session_state['import_end_time']
+                else:
+                    end_time = gateway_df.time.max()
+
+                import_start_time = st.time_input("Start Time", st_time, key='import_start_time', step=STEPS) #5*60)
+                import_end_time = st.time_input("End Time", end_time, key='import_end_time', step=STEPS) #5*60 )
                 # convert gateway data into milestones
                 gateway_df['valid'] = gateway_df.time.apply(lambda x: import_start_time<=x.time()<=import_end_time)
                 gps_df = gateway_df[gateway_df['valid']]
@@ -590,6 +600,8 @@ with tab_import:
                 # rssi_df = beacon_df.time.apply(lambda x: import_start_time<=x.time.time()<=import_end_time)
                 # show map
                 LATLON = gps_milestones_df.latitude.mean(), gps_milestones_df.longitude.mean()
+                if st.checkbox('Show gps data'):
+                    st.write(gps_milestones_df)
                 #
             with draw_col1:
                 st.select_slider('Zoom Levels', options=[i for i in range(10,20)], key='zoom_level_import')
@@ -688,6 +700,7 @@ with tab_import:
                                                 beacon_data=st.session_state["imported_beacon_data"],
                                                 gateway_df=gateway_df,
                                                 beacon_df=beacon_df,
+                                                override_gateway_height_m=np.float(st.session_state['override_gateway_height_m']),
                                                 start_time=st.session_state["import_start_time"],
                                                 end_time=st.session_state["import_end_time"],
                                                 osm_map = osm_map

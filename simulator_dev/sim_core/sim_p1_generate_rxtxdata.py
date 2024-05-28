@@ -24,6 +24,8 @@ if "sim_core" in ROOT:
     ROOT = os.getcwd().parent
 DEFAULT_OUTPATH = os.path.join(ROOT, "dump")
 DEFAULT_CSVPATH = os.path.join(ROOT, "dump/csvfiles")
+# Matlab Coverage Analysis
+RSSI_COVERAGEEST_METHOD = 'RayTrace' # 'LongleyRice'
 
 # -- scripts --
 class GenerateData(p0.Setup):
@@ -72,45 +74,78 @@ class GenerateData(p0.Setup):
         self.gateway_locations = gateway_coords
 
     # -- OSM Map Based coverage calcs --
-    def calc_osm_coverage(self, beacon_name, beacon_tx):
+    def calc_osm_coverage(self, beacon_name, beacon_tx, 
+                          coverage_method = RSSI_COVERAGEEST_METHOD):
         #
         eng = self.matlab_engine
-        model_name  = "longley-rice"
-        var_name  = "SituationVariabilityTolerance"
-        rtLongleyRice_SitVarMid= eng.propagationModel(model_name, var_name, 0.55)
-        #
-        viewer = eng.siteviewer('Buildings', self.OSMFile,
+        self.site_viewer = eng.siteviewer('Buildings', self.OSMFile,
                                 'Basemap', "topographic")
-        data_out  = eng.coverage(beacon_tx, rtLongleyRice_SitVarMid,
-                                 'MaxRange', 250)
-        #bcn_data_field = f'{beacon_name}_mdl'
-        #eng.workspace[bcn_data_field] = data_out
-        eng.workspace["this_mdl"] = data_out
-        #
-        osm_rssi_data = {'Latitude': [], 'Longitude': [], 'Power': []}
-        osm_rssi_data['Latitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Latitude"))
-        osm_rssi_data['Longitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Longitude"))
-        osm_rssi_data['Power'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Power"))
-        osm_rssi_data_df = pd.DataFrame.from_dict(osm_rssi_data)
-        self.osm_rssi_data[beacon_name] = osm_rssi_data_df
+        if coverage_method == 'LongleyRice':
+            model_name  = "longley-rice"
+            var_name  = "SituationVariabilityTolerance"
+            rtLongleyRice_SitVarMid= eng.propagationModel(model_name, var_name, 0.55)
+            self.propagation_model = rtLongleyRice_SitVarMid
+            #
+            data_out  = eng.coverage(beacon_tx, rtLongleyRice_SitVarMid,
+                                    'MaxRange', 250)
+            #bcn_data_field = f'{beacon_name}_mdl'
+            #eng.workspace[bcn_data_field] = data_out
+            eng.workspace["this_mdl"] = data_out
+            #
+            osm_rssi_data = {'Latitude': [], 'Longitude': [], 'Power': []}
+            osm_rssi_data['Latitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Latitude"))
+            osm_rssi_data['Longitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Longitude"))
+            osm_rssi_data['Power'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Power"))
+            osm_rssi_data_df = pd.DataFrame.from_dict(osm_rssi_data)
+            self.osm_rssi_data[beacon_name] = osm_rssi_data_df
+        else:
+            self.propagation_model = eng.propagationModel("raytracing",
+                                                            "Method","sbr",
+                                                            "AngularSeparation","low",
+                                                            "MaxNumReflections",0, 
+                                                            "SurfaceMaterial","concrete")
+    
 
-    def calc_rssi_from_osm_coverage(self, beacon_name, this_rx):
+    def calc_rssi_from_osm_coverage(self, beacon_name, beacon_tx,
+                                    gateway_rx, 
+                                    coverage_method=RSSI_COVERAGEEST_METHOD):
         #
         eng = self.matlab_engine
-        this_df = self.osm_rssi_data[beacon_name]
-        eng.workspace['rx'] = this_rx
+        viewer = self.site_viewer
+        pm = self.propagation_model
+        eng.workspace['rx'] = gateway_rx
+        eng.workspace['tx'] = beacon_tx
         rx_lonlat = eng.eval("rx.Longitude"), eng.eval("rx.Latitude")
-        # estimated ss
-        this_df['rx_dist'] = this_df.apply(lambda x: util.haversine_distance((x.Longitude, x.Latitude), rx_lonlat), axis=1)
-        nearest_idx = this_df['rx_dist'].argmin()
-        nearest_data = this_df.iloc[nearest_idx]
-        #
-        rssi = nearest_data.Power
-        dist = util.get_RSSI_to_distance_estimate(rssi)
-        dist_err = nearest_data.rx_dist
-        # placeholder
-        rssi_pm = (5, 5)
-        dist_pm = (dist_err, dist_err)
+        if coverage_method == 'LongleyRice':
+            # estimated ss
+            this_df = self.osm_rssi_data[beacon_name]
+            this_df['rx_dist'] = this_df.apply(lambda x: util.haversine_distance((x.Longitude, x.Latitude), rx_lonlat), axis=1)
+            nearest_idx = this_df['rx_dist'].argmin()
+            nearest_data = this_df.iloc[nearest_idx]
+            #
+            rssi = nearest_data.Power
+            dist = util.get_RSSI_to_distance_estimate(rssi)
+            dist_err = nearest_data.rx_dist
+            # placeholder
+            rssi_pm = (5, 5)
+            dist_pm = (dist_err, dist_err)
+        else:
+            los = eng.los(beacon_tx, gateway_rx, "Map", viewer)
+            rays = eng.raytrace(beacon_tx, gateway_rx, pm, "Map", viewer)
+            if los :
+                eng.workspace["rays"] = rays[0]
+                rssi = self.TxPower-eng.eval("rays.PathLoss")
+                dist = util.get_RSSI_to_distance_estimate(rssi)
+                dist_err = dist - eng.distance(beacon_tx, gateway_rx)
+                # placeholder
+                rssi_pm = (5, 5)    # in dBm
+                dist_pm = (dist_err, dist_err)
+            else:
+                rssi = np.nan
+                # placeholder
+                dist = np.nan
+                rssi_pm = (np.nan, np.nan)
+                dist_pm = (np.nan, np.nan)
         return rssi, rssi_pm, dist, dist_pm
   
     # -- Analyse for beacons and gateways --
@@ -131,7 +166,7 @@ class GenerateData(p0.Setup):
             tx = self.get_tx(blonlat)
             if self.OSMFile is not None:
                 self.calc_osm_coverage(beacon_name=bid,
-                                       beacon_tx=tx)
+                                       beacon_tx=tx)                                    
             for gid, gmarkers in self.gateway_locations.items():
                 # DEBUG:
                 for idx, glatlon in enumerate(gmarkers):
@@ -140,9 +175,9 @@ class GenerateData(p0.Setup):
                     glonlat = glatlon[1], glatlon[0]
                     rx = self.get_rx(lonlat=glonlat)
                     if self.OSMFile is not None:
-                        res = self.calc_rssi_from_osm_coverage(bid, rx)
+                        res = self.calc_rssi_from_osm_coverage(bid, tx, rx)
                     else:
-                        res = self.calc_txsignal(rx, tx)
+                        res = self.calc_txsignal(tx, rx)
                     #
                     rssi, rssi_pm_err, dist, dist_pm = res
                     gps_acc = np.abs(2 + np.random.randn())
@@ -222,8 +257,12 @@ class GenerateData(p0.Setup):
                     if row.gateway_status == 'Static':
                         # sampling from the same pool
                         # beacon
-                        bcn_rssi = row.rssi + np.random.random_integers(low=-row.rssi_var[0],
+                        if np.isnan(row.rssi):
+                            bcn_rssi = row.rssi
+                        else:
+                            bcn_rssi = row.rssi + np.random.random_integers(low=-row.rssi_var[0],
                                                                         high=row.rssi_var[1])
+                            
                         # gateway - only update if index meets criterion
                         #if ii%GPS_FLEET_UPDATE_INTERVAL < ADV_INTERVAL:
                         if gw_notcreated and ((bcn_time-gps_time).total_seconds()>GPS_FLEET_UPDATE_INTERVAL):
@@ -240,9 +279,12 @@ class GenerateData(p0.Setup):
                             for fld, val in gps_data.items():
                                 gw_gps_data[fld].append(val)
                     else:
-                        bcn_drssi = -row.Delta_rssi_rate*ii + np.random.random_integers(low=-row.rssi_var[0],
+                        if np.isnan(row.rssi):
+                            bcn_rssi = row.rssi
+                        else:
+                            bcn_drssi = -row.Delta_rssi_rate*ii + np.random.random_integers(low=-row.rssi_var[0],
                                                                                         high=row.rssi_var[1])
-                        bcn_rssi = row.rssi + bcn_drssi
+                            bcn_rssi = row.rssi + bcn_drssi
                         #
                         if gw_notcreated:
                             gps_time = milestone_start_time + milestone_time
@@ -385,7 +427,7 @@ class GenerateData(p0.Setup):
                         "AntennaHeight", gateway_RxHeight)
         return rx
 
-    def calc_txsignal(self, rx, tx):
+    def calc_txsignal(self, tx, rx):
         eng = self.matlab_engine
         # propagation model
         model_name  = "longley-rice"

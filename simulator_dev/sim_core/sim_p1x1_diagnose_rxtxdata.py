@@ -33,6 +33,8 @@ DEFAULT_IMPORT_DATAPATH = os.path.join(ROOT, "dump/datasource/dump/Tinglev/datas
 # env
 ENV_FILE = 'env/config.toml'
 ENV_FILE = os.path.join(ROOT, ENV_FILE)
+# Matlab Coverage Analysis
+RSSI_COVERAGEEST_METHOD = 'RayTrace' # 'LongleyRice'
 
 # -- scripts --
 class DiagnoseData():
@@ -42,6 +44,7 @@ class DiagnoseData():
                  beacon_data={},
                  gateway_df={},
                  beacon_df={},
+                 override_gateway_height_m=None,
                  start_time=datetime.datetime.now()-datetime.timedelta(seconds=3600),
                  end_time=datetime.datetime.now(),
                  osm_map = None
@@ -49,6 +52,7 @@ class DiagnoseData():
         self.start_end_time = start_time, end_time
         print(self.start_end_time)
         self.OSMFile = osm_map
+        self.override_gateway_height_m = override_gateway_height_m
         #
         if target_beacon_id is None:
             self.target_beacon_ids = [id for id in beacon_data]
@@ -150,44 +154,71 @@ class DiagnoseData():
     # --- calc from matlab ---
 
     # -- OSM Map Based coverage calcs --
-    def calc_osm_coverage(self):
+    def calc_osm_coverage(self, 
+                          coverage_method = RSSI_COVERAGEEST_METHOD):
         #
         beacon_tx = self.beacon_tx
         #
         eng = self.matlab_engine
-        model_name  = "longley-rice"
-        var_name  = "SituationVariabilityTolerance"
-        rtLongleyRice_SitVarMid= eng.propagationModel(model_name, var_name, 0.55)
-        #
-        viewer = eng.siteviewer('Buildings', self.OSMFile,
-                                'Basemap', "topographic")
-        data_out  = eng.coverage(beacon_tx, rtLongleyRice_SitVarMid,
-                                 'MaxRange', 250)
-        #bcn_data_field = f'{beacon_name}_mdl'
-        #eng.workspace[bcn_data_field] = data_out
-        eng.workspace["this_mdl"] = data_out
-        #
-        osm_rssi_data = {'Latitude': [], 'Longitude': [], 'Power': []}
-        osm_rssi_data['Latitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Latitude"))
-        osm_rssi_data['Longitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Longitude"))
-        osm_rssi_data['Power'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Power"))
-        osm_rssi_data_df = pd.DataFrame.from_dict(osm_rssi_data)
-        self.osm_rssi_data[self.target_beacon_id] = osm_rssi_data_df
-
-    def calc_rssi_from_osm_coverage(self, this_rx):
+        self.site_viewer = eng.siteviewer('Buildings', self.OSMFile,
+                                            'Basemap', "topographic")
+        if coverage_method == 'LongleyRice':
+            model_name  = "longley-rice"
+            var_name  = "SituationVariabilityTolerance"
+            rtLongleyRice_SitVarMid= eng.propagationModel(model_name, var_name, 0.55)
+            #
+            data_out  = eng.coverage(beacon_tx, rtLongleyRice_SitVarMid,
+                                    'MaxRange', 250)
+            #bcn_data_field = f'{beacon_name}_mdl'
+            #eng.workspace[bcn_data_field] = data_out
+            eng.workspace["this_mdl"] = data_out
+            #
+            osm_rssi_data = {'Latitude': [], 'Longitude': [], 'Power': []}
+            osm_rssi_data['Latitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Latitude"))
+            osm_rssi_data['Longitude'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Longitude"))
+            osm_rssi_data['Power'] = matutil.util_conv_matlab_arr_to_list(eng.eval("this_mdl.Data.Power"))
+            osm_rssi_data_df = pd.DataFrame.from_dict(osm_rssi_data)
+            self.osm_rssi_data[self.target_beacon_id] = osm_rssi_data_df
+        else:
+            self.propagation_model = eng.propagationModel("raytracing",
+                                                          "Method", "sbr",
+                                                          "AngularSeparation", "low",
+                                                          "MaxNumReflections", 0,
+                                                          "SurfaceMaterial", "concrete")
+    #
+    def calc_rssi_from_osm_coverage(self,
+                                    gateway_rx,
+                                    coverage_method=RSSI_COVERAGEEST_METHOD):
         #
         eng = self.matlab_engine
-        this_df = self.osm_rssi_data[self.target_beacon_id]
-        eng.workspace['rx'] = this_rx
-        rx_lonlat = eng.eval("rx.Longitude"), eng.eval("rx.Latitude")
-        # estimated ss
-        this_df['rx_dist'] = this_df.apply(lambda x: util.haversine_distance((x.Longitude, x.Latitude), rx_lonlat), axis=1)
-        nearest_idx = this_df['rx_dist'].argmin()
-        nearest_data = this_df.iloc[nearest_idx]
+        viewer = self.site_viewer
+        pm = self.propagation_model
+        eng.workspace['rx'] = gateway_rx
+        beacon_tx = self.beacon_tx
         #
-        rssi = nearest_data.Power
-        # placeholder
-        rssi_pm = (5, 5)
+        rx_lonlat = eng.eval("rx.Longitude"), eng.eval("rx.Latitude")
+        if coverage_method == 'LongleyRice':
+            # estimated ss
+            this_df = self.osm_rssi_data[self.target_beacon_id]
+            this_df['rx_dist'] = this_df.apply(lambda x: util.haversine_distance((x.Longitude, x.Latitude), rx_lonlat), axis=1)
+            nearest_idx = this_df['rx_dist'].argmin()
+            nearest_data = this_df.iloc[nearest_idx]
+            #
+            rssi = nearest_data.Power
+            # placeholder
+            rssi_pm = (5, 5)
+        else:
+            los = eng.los(beacon_tx, gateway_rx, "Map", viewer)
+            rays = eng.raytrace(beacon_tx, gateway_rx, pm, "Map", viewer)
+            if los:
+                eng.workspace["rays"] = rays[0]
+                rssi = self.TxPower-eng.eval("rays.PathLoss")
+                # placeholder
+                rssi_pm = (5, 5)    # in dBm
+            else:
+                rssi = np.nan
+                # placeholder
+                rssi_pm = (np.nan, np.nan)
         return rssi, rssi_pm
   
     # -- simulated beacon data --
@@ -225,8 +256,8 @@ class DiagnoseData():
         et3  = time.time()
         if VERBOSE:
             print(f'time: {et3-et2:.1f}secs')
-        sim_unified_df['rssi_val'] = sim_unified_df.rssi_var_tuple.apply(lambda x: x[0] + np.random.random_integers(low=-x[1][0],
-                                                                                                                high=x[1][1]))
+        sim_unified_df['rssi_val'] = sim_unified_df.rssi_var_tuple.apply(lambda x: x[0] if np.isnan(x[0])
+                                                                                        else x[0] + np.random.random_integers(low=-x[1][0], high=x[1][1]))
         sim_unified_df['rssi'] = sim_unified_df.rssi_val.apply(lambda x: x if x > self.config['RSSI_THRESH'] else np.nan)
         et4  = time.time()
         if VERBOSE:
@@ -293,7 +324,10 @@ class DiagnoseData():
     def get_rx(self, lonlat):
         #   receiver 
         eng = self.matlab_engine
-        gateway_RxHeight = self.config['RxHeight']
+        if self.override_gateway_height_m is None:
+            gateway_RxHeight = self.config['RxHeight']
+        else:
+            gateway_RxHeight = self.override_gateway_height_m
         rx = eng.rxsite('Name', "Crane Receiver",
                         "Latitude", lonlat[1],
                         "Longitude", lonlat[0],
