@@ -229,9 +229,9 @@ class GenerateData(p0.Setup):
         ref_df = self.milestones_df
         gw_gps_data = {'time': [], 'latitude': [], 'longitude': [],
                        'accuracy': [], 'gateway_id': [], 'marker_index': []}
-        bcn_rssi_data = {'time': [], 
-                         'rssi': [], 'distance': [], 
-                         'gateway_id': [], 'beacon_id': [], 
+        bcn_rssi_data = {'time': [],
+                         'rssi': [], 'distance': [], 'gps': [],
+                         'gateway_id': [], 'beacon_id': [],
                          'marker_index': []}
         #
         gw_notcreated = True
@@ -307,6 +307,7 @@ class GenerateData(p0.Setup):
                     beacon_data = {'time': bcn_time, 
                                    'rssi': bcn_rssi, 
                                    'distance': gps_bcn_dist,
+                                   'gps': bcn_lonlat,
                                    'gateway_id': gw_id, 
                                    'beacon_id': bcn_id, 
                                    'marker_index': idx}                    
